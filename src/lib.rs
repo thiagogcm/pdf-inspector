@@ -31,6 +31,9 @@
 #[cfg(feature = "python")]
 pub mod python;
 
+#[cfg(feature = "c-api")]
+pub mod c_api;
+
 pub mod adobe_korea1;
 pub mod detector;
 pub mod extractor;
@@ -50,8 +53,9 @@ pub use detector::{
     detect_pdf_type_with_config, DetectionConfig, PdfType, PdfTypeResult, ScanStrategy,
 };
 pub use extractor::{
-    extract_text, extract_text_with_positions, extract_text_with_positions_mem,
-    extract_text_with_positions_pages, extract_text_with_positions_pages_with_password,
+    extract_text, extract_text_mem, extract_text_with_positions, extract_text_with_positions_mem,
+    extract_text_with_positions_mem_pages, extract_text_with_positions_pages,
+    extract_text_with_positions_pages_with_password,
 };
 pub use markdown::{
     to_markdown, to_markdown_from_items, to_markdown_from_items_with_rects,
@@ -162,17 +166,15 @@ pub struct PdfProcessResult {
 // Options builder
 // =========================================================================
 
-/// Configuration for [`process_pdf_with_options`] and friends.
+/// Processing configuration: mode, detection thresholds, markdown formatting,
+/// and an optional page filter.
 ///
-/// Use the builder methods to customise behaviour:
-///
-/// ```
-/// use pdf_inspector::{PdfOptions, ProcessMode};
-///
-/// let opts = PdfOptions::new()
-///     .mode(ProcessMode::Analyze)
-///     .pages([1, 3, 5]);
-/// ```
+/// Construct one and customise it before handing it to a processing entry
+/// point; the `PdfOptions::new` builder carries a Rust example. This type is
+/// also exposed over the C ABI as an opaque handle, created with
+/// `pdf_inspector_options_new`, configured through the
+/// `pdf_inspector_options_set_*` functions, and released with
+/// `pdf_inspector_options_free`.
 #[derive(Clone)]
 pub struct PdfOptions {
     /// How far the pipeline should run (default: [`ProcessMode::Full`]).
@@ -216,6 +218,16 @@ impl Default for PdfOptions {
 
 impl PdfOptions {
     /// Create options with all defaults ([`ProcessMode::Full`]).
+    ///
+    /// Use the builder methods to customise behaviour:
+    ///
+    /// ```
+    /// use pdf_inspector::{PdfOptions, ProcessMode};
+    ///
+    /// let opts = PdfOptions::new()
+    ///     .mode(ProcessMode::Analyze)
+    ///     .pages([1, 3, 5]);
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
@@ -390,8 +402,17 @@ pub struct PdfClassification {
 /// Classify a PDF from a memory buffer without extracting text.
 /// Returns the PDF type and which pages need OCR (~10-50ms).
 pub fn classify_pdf_mem(buffer: &[u8]) -> Result<PdfClassification, PdfError> {
+    classify_pdf_mem_with_password(buffer, None)
+}
+
+/// Classify a PDF from a memory buffer, decrypting with `password` when the
+/// PDF is encrypted.
+fn classify_pdf_mem_with_password(
+    buffer: &[u8],
+    password: Option<&str>,
+) -> Result<PdfClassification, PdfError> {
     validate_pdf_bytes(buffer)?;
-    let (doc, page_count) = load_document_from_mem(buffer)?;
+    let (doc, page_count) = load_document_from_mem_with_password(buffer, password)?;
     let detection = detector::detect_from_document(&doc, page_count, &DetectionConfig::default())?;
     Ok(PdfClassification {
         pdf_type: detection.pdf_type,
@@ -459,10 +480,20 @@ pub fn extract_pages_markdown_mem(
     buffer: &[u8],
     pages: Option<&[u32]>,
 ) -> Result<PagesExtractionResult, PdfError> {
+    extract_pages_markdown_mem_with_password(buffer, pages, None)
+}
+
+/// [`extract_pages_markdown_mem`], decrypting with `password` when the PDF is
+/// encrypted.
+fn extract_pages_markdown_mem_with_password(
+    buffer: &[u8],
+    pages: Option<&[u32]>,
+    password: Option<&str>,
+) -> Result<PagesExtractionResult, PdfError> {
     extract_pages_markdown_mem_impl(
         buffer,
         pages,
-        None,
+        password,
         &MarkdownOptions::default(),
         false,
         false,
@@ -826,9 +857,19 @@ pub fn extract_pages_markdown<P: AsRef<Path>>(
     path: P,
     pages: Option<&[u32]>,
 ) -> Result<PagesExtractionResult, PdfError> {
+    extract_pages_markdown_with_password(path, pages, None)
+}
+
+/// [`extract_pages_markdown`], decrypting with `password` when the PDF is
+/// encrypted.
+fn extract_pages_markdown_with_password<P: AsRef<Path>>(
+    path: P,
+    pages: Option<&[u32]>,
+    password: Option<&str>,
+) -> Result<PagesExtractionResult, PdfError> {
     validate_pdf_file(&path)?;
     let buffer = std::fs::read(path.as_ref())?;
-    extract_pages_markdown_mem(&buffer, pages)
+    extract_pages_markdown_mem_with_password(&buffer, pages, password)
 }
 
 // =========================================================================
@@ -867,8 +908,18 @@ pub fn extract_structure_elements_mem(
     buffer: &[u8],
     pages: Option<&[u32]>,
 ) -> Result<Vec<StructureElement>, PdfError> {
+    extract_structure_elements_mem_with_password(buffer, pages, None)
+}
+
+/// [`extract_structure_elements_mem`], decrypting with `password` when the
+/// PDF is encrypted.
+fn extract_structure_elements_mem_with_password(
+    buffer: &[u8],
+    pages: Option<&[u32]>,
+    password: Option<&str>,
+) -> Result<Vec<StructureElement>, PdfError> {
     validate_pdf_bytes(buffer)?;
-    let (doc, _page_count) = load_document_from_mem(buffer)?;
+    let (doc, _page_count) = load_document_from_mem_with_password(buffer, password)?;
     let Some(tree) = structure_tree::StructTree::from_doc(&doc) else {
         return Ok(Vec::new());
     };
@@ -900,9 +951,19 @@ pub fn extract_structure_elements<P: AsRef<Path>>(
     path: P,
     pages: Option<&[u32]>,
 ) -> Result<Vec<StructureElement>, PdfError> {
+    extract_structure_elements_with_password(path, pages, None)
+}
+
+/// [`extract_structure_elements`], decrypting with `password` when the PDF is
+/// encrypted.
+fn extract_structure_elements_with_password<P: AsRef<Path>>(
+    path: P,
+    pages: Option<&[u32]>,
+    password: Option<&str>,
+) -> Result<Vec<StructureElement>, PdfError> {
     validate_pdf_file(&path)?;
     let buffer = std::fs::read(path.as_ref())?;
-    extract_structure_elements_mem(&buffer, pages)
+    extract_structure_elements_mem_with_password(&buffer, pages, password)
 }
 
 // =========================================================================
@@ -971,8 +1032,18 @@ pub fn extract_text_in_regions_mem(
     buffer: &[u8],
     page_regions: &[(u32, Vec<[f32; 4]>)],
 ) -> Result<Vec<PageRegionResult>, PdfError> {
+    extract_text_in_regions_mem_with_password(buffer, page_regions, None)
+}
+
+/// [`extract_text_in_regions_mem`], decrypting with `password` when the PDF is
+/// encrypted.
+fn extract_text_in_regions_mem_with_password(
+    buffer: &[u8],
+    page_regions: &[(u32, Vec<[f32; 4]>)],
+    password: Option<&str>,
+) -> Result<Vec<PageRegionResult>, PdfError> {
     validate_pdf_bytes(buffer)?;
-    let (doc, _page_count) = load_document_from_mem(buffer)?;
+    let (doc, _page_count) = load_document_from_mem_with_password(buffer, password)?;
     let pages = doc.get_pages();
 
     // Build a set of pages we need to extract (1-indexed for lopdf)
@@ -1193,8 +1264,16 @@ pub fn extract_tables_in_regions_mem(
     buffer: &[u8],
     page_regions: &[(u32, Vec<[f32; 4]>)],
 ) -> Result<Vec<PageRegionResult>, PdfError> {
+    extract_tables_in_regions_mem_with_password(buffer, page_regions, None)
+}
+
+fn extract_tables_in_regions_mem_with_password(
+    buffer: &[u8],
+    page_regions: &[(u32, Vec<[f32; 4]>)],
+    password: Option<&str>,
+) -> Result<Vec<PageRegionResult>, PdfError> {
     validate_pdf_bytes(buffer)?;
-    let (doc, _page_count) = load_document_from_mem(buffer)?;
+    let (doc, _page_count) = load_document_from_mem_with_password(buffer, password)?;
     let pages = doc.get_pages();
 
     let needed_pages: HashSet<u32> = page_regions.iter().map(|(p, _)| p + 1).collect();
@@ -1345,7 +1424,7 @@ pub fn extract_tables_in_regions_mem(
             // Total length of text the page extractor saw inside this
             // region, used by the captured-fragment guard below.
             let region_text_chars: usize = matched.iter().map(|i| i.text.chars().count()).sum();
-            let region_area = (rx2 - rx1).max(0.0) * (ry2 - ry1).max(0.0);
+            let region_area = (rx2 - rx1).abs() * (ry2 - ry1).abs();
             let line_region_has_vertical_rules = has_vertical_rules(&region_lines);
 
             let evaluate =
@@ -1516,8 +1595,24 @@ pub fn detect_vector_grid_in_region_mem(
     region_pdf_pt_bbox: [f32; 4],
     render_dpi: f32,
 ) -> Result<Option<VectorGridDetection>, PdfError> {
+    detect_vector_grid_in_region_mem_with_password(
+        buffer,
+        page_idx,
+        region_pdf_pt_bbox,
+        render_dpi,
+        None,
+    )
+}
+
+fn detect_vector_grid_in_region_mem_with_password(
+    buffer: &[u8],
+    page_idx: u32,
+    region_pdf_pt_bbox: [f32; 4],
+    render_dpi: f32,
+    password: Option<&str>,
+) -> Result<Option<VectorGridDetection>, PdfError> {
     validate_pdf_bytes(buffer)?;
-    let (doc, _page_count) = load_document_from_mem(buffer)?;
+    let (doc, _page_count) = load_document_from_mem_with_password(buffer, password)?;
     let pages = doc.get_pages();
 
     let page_1idx = page_idx + 1;
@@ -1680,18 +1775,33 @@ fn vector_grid_result_from_table(
     })
 }
 
+/// Pixels per PDF point at `render_dpi`, falling back to 1.0 for a
+/// non-positive DPI.
+fn ppi_for_render_dpi(render_dpi: f32) -> f32 {
+    if render_dpi > 0.0 {
+        render_dpi / 72.0
+    } else {
+        1.0
+    }
+}
+
 fn crop_px_bbox_is_plausible(
     bbox_px: [f32; 4],
     crop_pdf_pt_bbox: [f32; 4],
     render_dpi: f32,
 ) -> bool {
-    let ppi = if render_dpi > 0.0 {
-        render_dpi / 72.0
-    } else {
-        1.0
-    };
+    if !bbox_px.iter().all(|coordinate| coordinate.is_finite())
+        || bbox_px[0] >= bbox_px[2]
+        || bbox_px[1] >= bbox_px[3]
+    {
+        return false;
+    }
+    let ppi = ppi_for_render_dpi(render_dpi);
     let crop_w = (crop_pdf_pt_bbox[2] - crop_pdf_pt_bbox[0]).abs() * ppi;
     let crop_h = (crop_pdf_pt_bbox[3] - crop_pdf_pt_bbox[1]).abs() * ppi;
+    if !crop_w.is_finite() || !crop_h.is_finite() {
+        return false;
+    }
     let slack = 1.0;
     bbox_px[0] >= -slack
         && bbox_px[1] >= -slack
@@ -2111,6 +2221,21 @@ mod vector_grid_tests {
             crop,
             -144.0
         ));
+        assert!(!crop_px_bbox_is_plausible(
+            [0.0, 0.0, f32::INFINITY, 200.0],
+            crop,
+            72.0
+        ));
+        assert!(!crop_px_bbox_is_plausible(
+            [10.0, 0.0, 5.0, 200.0],
+            crop,
+            72.0
+        ));
+        assert!(!crop_px_bbox_is_plausible(
+            [0.0, 0.0, 100.0, 200.0],
+            crop,
+            f32::MAX
+        ));
     }
 }
 
@@ -2394,11 +2519,7 @@ fn extracted_cell_to_crop_px(
         return None;
     }
 
-    let ppi = if render_dpi > 0.0 {
-        render_dpi / 72.0
-    } else {
-        1.0
-    };
+    let ppi = ppi_for_render_dpi(render_dpi);
     let [crop_x1, crop_y1, _, _] = crop_pdf_pt_bbox;
     Some([
         (x1 - crop_x1) * ppi,
@@ -2481,12 +2602,20 @@ pub fn extract_tables_with_structure_cells_mem(
     buffer: &[u8],
     inputs: &[TsrTableInput],
 ) -> Result<Vec<Vec<tables::StructuredCell>>, PdfError> {
+    extract_tables_with_structure_cells_mem_with_password(buffer, inputs, None)
+}
+
+fn extract_tables_with_structure_cells_mem_with_password(
+    buffer: &[u8],
+    inputs: &[TsrTableInput],
+    password: Option<&str>,
+) -> Result<Vec<Vec<tables::StructuredCell>>, PdfError> {
     use tables::structured::{
         cell_px_to_page_pt, normalize_cell_bands, parse_structure, polygon_to_aabb, StructuredCell,
     };
 
     validate_pdf_bytes(buffer)?;
-    let (doc, _page_count) = load_document_from_mem(buffer)?;
+    let (doc, _page_count) = load_document_from_mem_with_password(buffer, password)?;
     let pages = doc.get_pages();
 
     let needed_pages: HashSet<u32> = inputs.iter().map(|t| t.page + 1).collect();
@@ -3271,6 +3400,7 @@ fn detect_tsr_quality_issue(
     buffer: &[u8],
     input: &TsrTableInput,
     cells: &[tables::StructuredCell],
+    password: Option<&str>,
 ) -> Result<Option<TsrQualityIssue>, PdfError> {
     if cells.is_empty() {
         return Ok(None);
@@ -3298,7 +3428,7 @@ fn detect_tsr_quality_issue(
     // a tall TSR cell catches text from two adjacent PDF rows that
     // SLANet failed to separate. Cells declared `rowspan>1` are
     // expected to be multi-line and are excluded.
-    let (doc, _page_count) = load_document_from_mem(buffer)?;
+    let (doc, _page_count) = load_document_from_mem_with_password(buffer, password)?;
     let pages = doc.get_pages();
     let page_1idx = input.page + 1;
     let Some(&page_id) = pages.get(&page_1idx) else {
@@ -3402,7 +3532,16 @@ pub fn extract_tables_with_structure_auto_mem(
     buffer: &[u8],
     inputs: &[TsrTableInput],
 ) -> Result<Vec<TableExtractionResult>, PdfError> {
-    let tsr_cells = extract_tables_with_structure_cells_mem(buffer, inputs)?;
+    extract_tables_with_structure_auto_mem_with_password(buffer, inputs, None)
+}
+
+fn extract_tables_with_structure_auto_mem_with_password(
+    buffer: &[u8],
+    inputs: &[TsrTableInput],
+    password: Option<&str>,
+) -> Result<Vec<TableExtractionResult>, PdfError> {
+    let tsr_cells =
+        extract_tables_with_structure_cells_mem_with_password(buffer, inputs, password)?;
     let mut results = Vec::with_capacity(inputs.len());
 
     for (i, input) in inputs.iter().enumerate() {
@@ -3413,7 +3552,7 @@ pub fn extract_tables_with_structure_auto_mem(
             tables::cells_to_markdown(cells)
         };
 
-        let issue = match detect_tsr_quality_issue(buffer, input, cells) {
+        let issue = match detect_tsr_quality_issue(buffer, input, cells, password) {
             Ok(opt) => opt,
             Err(_) => {
                 // Detection failed for this input — fall through with
@@ -3449,9 +3588,10 @@ pub fn extract_tables_with_structure_auto_mem(
                 }
                 // Fall back to heuristic on the input's table region.
                 // The crop's PDF-pt bbox IS the table region.
-                let heuristic_md = match extract_tables_in_regions_mem(
+                let heuristic_md = match extract_tables_in_regions_mem_with_password(
                     buffer,
                     &[(input.page, vec![input.crop_pdf_pt_bbox])],
+                    password,
                 ) {
                     Ok(pages) => pages
                         .into_iter()
@@ -3784,17 +3924,6 @@ fn tsr_region_contains_item(item: &TextItem, bounds: RegionBounds) -> bool {
 // Internal: single-load document pipeline
 // =========================================================================
 
-/// Load a PDF from disk, returning the parsed document and page count.
-///
-/// `Document::load_metadata` for page count + `Document::load` for content
-/// are combined here, but lopdf loads the full doc in `load()` so we extract
-/// page count from it directly to avoid the metadata-only round-trip.
-pub(crate) fn load_document_from_path<P: AsRef<Path>>(
-    path: P,
-) -> Result<(Document, u32), PdfError> {
-    load_document_from_path_with_password(path, None)
-}
-
 /// Load a PDF file, decrypting with `password` if the file is encrypted.
 pub(crate) fn load_document_from_path_with_password<P: AsRef<Path>>(
     path: P,
@@ -3802,11 +3931,6 @@ pub(crate) fn load_document_from_path_with_password<P: AsRef<Path>>(
 ) -> Result<(Document, u32), PdfError> {
     let buffer = std::fs::read(&path)?;
     load_document_from_mem_with_password(&buffer, password)
-}
-
-/// Load a PDF from a memory buffer.
-pub(crate) fn load_document_from_mem(buffer: &[u8]) -> Result<(Document, u32), PdfError> {
-    load_document_from_mem_with_password(buffer, None)
 }
 
 /// Load a PDF from a memory buffer, decrypting with `password` if encrypted.
@@ -3827,7 +3951,7 @@ pub(crate) fn load_document_from_mem_with_password(
                 match load_document_bytes(&repaired, password) {
                     Ok(doc) => {
                         log::debug!("loaded PDF after repairing malformed container bytes");
-                        let page_count = doc.get_pages().len() as u32;
+                        let page_count = u32::try_from(doc.get_pages().len()).unwrap_or(u32::MAX);
                         return Ok((doc, page_count));
                     }
                     Err(e) => {
@@ -3840,7 +3964,7 @@ pub(crate) fn load_document_from_mem_with_password(
             return Err(first_err.into());
         }
     };
-    let page_count = doc.get_pages().len() as u32;
+    let page_count = u32::try_from(doc.get_pages().len()).unwrap_or(u32::MAX);
     Ok((doc, page_count))
 }
 

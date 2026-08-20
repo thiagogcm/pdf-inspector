@@ -53,15 +53,34 @@ pub(crate) fn trace_text_preview(text: &str, max_chars: usize) -> &str {
 
 /// Extract text from PDF file as plain string
 pub fn extract_text<P: AsRef<Path>>(path: P) -> Result<String, PdfError> {
+    extract_text_with_password(path, None)
+}
+
+/// Extract text from a PDF file, decrypting with `password` when the PDF is
+/// encrypted. `password` follows the crate-wide convention: `None` falls back
+/// to the empty password (owner-only encryption).
+pub(crate) fn extract_text_with_password<P: AsRef<Path>>(
+    path: P,
+    password: Option<&str>,
+) -> Result<String, PdfError> {
     crate::validate_pdf_file(&path)?;
-    let (doc, _) = crate::load_document_from_path(&path)?;
+    let (doc, _) = crate::load_document_from_path_with_password(&path, password)?;
     extract_text_from_doc(&doc)
 }
 
 /// Extract text from PDF memory buffer
 pub fn extract_text_mem(buffer: &[u8]) -> Result<String, PdfError> {
+    extract_text_mem_with_password(buffer, None)
+}
+
+/// Extract text from a PDF memory buffer, decrypting with `password` when the
+/// PDF is encrypted.
+pub(crate) fn extract_text_mem_with_password(
+    buffer: &[u8],
+    password: Option<&str>,
+) -> Result<String, PdfError> {
     crate::validate_pdf_bytes(buffer)?;
-    let (doc, _) = crate::load_document_from_mem(buffer)?;
+    let (doc, _) = crate::load_document_from_mem_with_password(buffer, password)?;
     extract_text_from_doc(&doc)
 }
 
@@ -130,17 +149,30 @@ pub fn extract_text_with_positions_mem_pages(
     buffer: &[u8],
     page_filter: Option<&HashSet<u32>>,
 ) -> Result<Vec<TextItem>, PdfError> {
-    let (items, _rects, _lines) = extract_text_with_positions_mem_and_rects(buffer, page_filter)?;
+    extract_text_with_positions_mem_pages_with_password(buffer, page_filter, None)
+}
+
+/// Extract text with positions from a memory buffer, limited to specific
+/// pages and decrypting with `password` when the PDF is encrypted.
+pub(crate) fn extract_text_with_positions_mem_pages_with_password(
+    buffer: &[u8],
+    page_filter: Option<&HashSet<u32>>,
+    password: Option<&str>,
+) -> Result<Vec<TextItem>, PdfError> {
+    let (items, _rects, _lines) =
+        extract_text_with_positions_mem_and_rects_with_password(buffer, page_filter, password)?;
     Ok(items)
 }
 
-/// Extract text with positions and rectangles from memory buffer.
-pub(crate) fn extract_text_with_positions_mem_and_rects(
+/// Extract text with positions and rectangles from a memory buffer,
+/// decrypting with `password` when the PDF is encrypted.
+pub(crate) fn extract_text_with_positions_mem_and_rects_with_password(
     buffer: &[u8],
     page_filter: Option<&HashSet<u32>>,
+    password: Option<&str>,
 ) -> Result<PageExtraction, PdfError> {
     crate::validate_pdf_bytes(buffer)?;
-    let (doc, _) = crate::load_document_from_mem(buffer)?;
+    let (doc, _) = crate::load_document_from_mem_with_password(buffer, password)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
     let (extraction, _thresholds, _gid_pages) =
         extract_positioned_text_from_doc(&doc, &font_cmaps, page_filter)?;
