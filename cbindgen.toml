@@ -1,0 +1,26 @@
+style = "type"
+language = "C"
+usize_is_size_t = true
+include_guard = "PDF_INSPECTOR_H"
+cpp_compat = true
+# Only the headers the ABI actually uses.
+no_includes = true
+sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
+
+[enum]
+prefix_with_name = true
+
+[export]
+# Constant-only enums: their setters take a plain `i32`, not the enum type,
+# so no signature references it for cbindgen to find on its own.
+# `CTextItemType` joins them now that item type is read out of
+# `CTextItemMetrics.item_type` as a plain `int32_t`.
+include = ["CProcessMode", "CMarkdownProfile", "CScanStrategy", "CTextItemType"]
+# Unrelated to the C ABI (src/vision/render.rs) and mistyped once exported.
+exclude = ["DEFAULT_RENDER_DPI", "DEFAULT_MAX_OUTPUT_BYTES"]
+
+[export.rename]
+# The options handle is the one ABI type whose Rust name is the crate's own
+# `PdfOptions`. Every other exported type is `C`-prefixed, and an unprefixed
+# `PdfOptions` is an unusually generic tag to claim in C's flat namespace.
+"PdfOptions" = "CPdfOptions"

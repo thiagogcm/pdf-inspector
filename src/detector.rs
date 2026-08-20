@@ -99,9 +99,17 @@ pub fn detect_pdf_type_with_config<P: AsRef<Path>>(
     path: P,
     config: DetectionConfig,
 ) -> Result<PdfTypeResult, PdfError> {
+    detect_pdf_type_with_config_and_password(path, config, None)
+}
+
+pub(crate) fn detect_pdf_type_with_config_and_password<P: AsRef<Path>>(
+    path: P,
+    config: DetectionConfig,
+    password: Option<&str>,
+) -> Result<PdfTypeResult, PdfError> {
     crate::validate_pdf_file(&path)?;
 
-    let (doc, page_count) = crate::load_document_from_path(&path)?;
+    let (doc, page_count) = crate::load_document_from_path_with_password(&path, password)?;
 
     detect_from_document(&doc, page_count, &config)
 }
@@ -116,9 +124,17 @@ pub fn detect_pdf_type_mem_with_config(
     buffer: &[u8],
     config: DetectionConfig,
 ) -> Result<PdfTypeResult, PdfError> {
+    detect_pdf_type_mem_with_config_and_password(buffer, config, None)
+}
+
+pub(crate) fn detect_pdf_type_mem_with_config_and_password(
+    buffer: &[u8],
+    config: DetectionConfig,
+    password: Option<&str>,
+) -> Result<PdfTypeResult, PdfError> {
     crate::validate_pdf_bytes(buffer)?;
 
-    let (doc, page_count) = crate::load_document_from_mem(buffer)?;
+    let (doc, page_count) = crate::load_document_from_mem_with_password(buffer, password)?;
 
     detect_from_document(&doc, page_count, &config)
 }
@@ -187,7 +203,7 @@ pub(crate) fn detect_from_document(
     config: &DetectionConfig,
 ) -> Result<PdfTypeResult, PdfError> {
     let pages = doc.get_pages();
-    let total_pages = pages.len() as u32;
+    let total_pages = page_count;
 
     // Select pages to scan based on strategy
     let (sample_indices, allow_early_exit) = match &config.strategy {
@@ -233,7 +249,7 @@ pub(crate) fn detect_from_document(
                 analysis.has_decodable_text_fonts
             );
             let is_image_dominated = analysis.image_count > 10
-                && analysis.image_count > analysis.text_operator_count * 3;
+                && analysis.image_count > analysis.text_operator_count.saturating_mul(3);
             let effective_min_ops = if analysis.has_images || analysis.image_count > 0 {
                 config.min_text_ops_per_page.max(10)
             } else {
@@ -269,7 +285,7 @@ pub(crate) fn detect_from_document(
             if analysis.has_vector_text {
                 pages_with_vector_text += 1;
             }
-            total_text_ops += analysis.text_operator_count;
+            total_text_ops = total_text_ops.saturating_add(analysis.text_operator_count);
             analysis_cache.insert(*page_num, analysis.clone());
 
             // Early exit: if this page is non-text (insufficient meaningful text

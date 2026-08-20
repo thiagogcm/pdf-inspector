@@ -62,8 +62,36 @@ pub(crate) struct CellSlot {
 /// rowspan/colspan attributes are honoured and prior-row rowspans push
 /// later-row cells to the right.
 pub(crate) fn parse_structure(tokens: &[String]) -> Vec<CellSlot> {
+    parse_structure_inner(tokens, false).unwrap_or_default()
+}
+
+/// Checked parser used at trust boundaries. Rejects spans that could overflow
+/// coordinates or make the occupancy map grow independently of input size.
+///
+/// Stricter than [`parse_structure`]: a span that overhangs the declared rows,
+/// exceeds the column limit, or carries an unparseable value is a hard reject
+/// here, where the best-effort parser clamps it. C callers get
+/// `InvalidArgument` for those instead of a silently mangled table; in-process
+/// callers keep the lenient layout real TSR models depend on.
+pub(crate) fn parse_structure_checked(tokens: &[String]) -> Option<Vec<CellSlot>> {
+    parse_structure_inner(tokens, true)
+}
+
+/// Shared implementation. `strict` selects reject-vs-clamp for the three
+/// recoverable span pathologies; the overflow and occupancy-work guards are
+/// unconditional, since unbounded work is not something any caller wants.
+fn parse_structure_inner(tokens: &[String], strict: bool) -> Option<Vec<CellSlot>> {
+    const MAX_COLUMNS: usize = 25;
+    const MAX_OCCUPIED_CELLS: usize = 1_000_000;
+
     let mut slots: Vec<CellSlot> = Vec::new();
     let mut occupied: HashSet<(usize, usize)> = HashSet::new();
+    let mut occupied_work = 0usize;
+    let row_limit = tokens
+        .iter()
+        .filter(|token| token.trim() == "<tr>")
+        .count()
+        .max(1);
     let mut row: usize = 0;
     let mut col: usize = 0;
     let mut bbox_idx: usize = 0;
@@ -82,7 +110,7 @@ pub(crate) fn parse_structure(tokens: &[String]) -> Vec<CellSlot> {
             }
             "<tr>" => {
                 if started_first_row {
-                    row += 1;
+                    row = row.checked_add(1)?;
                 }
                 col = 0;
                 started_first_row = true;
@@ -90,7 +118,7 @@ pub(crate) fn parse_structure(tokens: &[String]) -> Vec<CellSlot> {
             "<td></td>" | "<th></th>" => {
                 let is_th = tok == "<th></th>";
                 while occupied.contains(&(row, col)) {
-                    col += 1;
+                    col = col.checked_add(1)?;
                 }
                 slots.push(CellSlot {
                     row,
@@ -100,8 +128,8 @@ pub(crate) fn parse_structure(tokens: &[String]) -> Vec<CellSlot> {
                     is_header: in_thead || is_th,
                     bbox_idx,
                 });
-                bbox_idx += 1;
-                col += 1;
+                bbox_idx = bbox_idx.checked_add(1)?;
+                col = col.checked_add(1)?;
             }
             "<td" | "<th" => {
                 let is_th = tok == "<th";
@@ -111,16 +139,39 @@ pub(crate) fn parse_structure(tokens: &[String]) -> Vec<CellSlot> {
                 i += 1;
                 while i < tokens.len() && tokens[i].trim() != ">" {
                     let attr = tokens[i].as_str();
-                    if let Some(v) = parse_int_attr(attr, "rowspan") {
-                        rowspan = v.max(1);
-                    } else if let Some(v) = parse_int_attr(attr, "colspan") {
-                        colspan = v.max(1);
+                    // An attribute that names a span but carries an
+                    // unparseable value (`rowspan="abc"`, a bare `rowspan`)
+                    // leaves the span at 1 for best-effort callers.
+                    if attr.trim().starts_with("rowspan") {
+                        match parse_int_attr(attr, "rowspan") {
+                            Some(value) => rowspan = value.max(1),
+                            None if strict => return None,
+                            None => {}
+                        }
+                    } else if attr.trim().starts_with("colspan") {
+                        match parse_int_attr(attr, "colspan") {
+                            Some(value) => colspan = value.max(1),
+                            None if strict => return None,
+                            None => {}
+                        }
                     }
                     i += 1;
                 }
+                // A rowspan overhanging the declared `<tr>` count and an
+                // oversized colspan are routine TSR-model output. Rejecting
+                // the whole table for either drops every cell; clamping keeps
+                // the layout usable and still bounds the occupancy map.
+                let overhangs_rows = row.checked_add(rowspan).is_none_or(|end| end > row_limit);
+                if strict && (overhangs_rows || colspan > MAX_COLUMNS) {
+                    return None;
+                }
+                if overhangs_rows {
+                    rowspan = row_limit.saturating_sub(row).max(1);
+                }
+                colspan = colspan.min(MAX_COLUMNS);
                 // i now points at the `>` token (or off the end if malformed).
                 while occupied.contains(&(row, col)) {
-                    col += 1;
+                    col = col.checked_add(1)?;
                 }
                 slots.push(CellSlot {
                     row,
@@ -130,13 +181,19 @@ pub(crate) fn parse_structure(tokens: &[String]) -> Vec<CellSlot> {
                     is_header: in_thead || is_th,
                     bbox_idx,
                 });
-                for r in row..row + rowspan {
-                    for c in col..col + colspan {
+                let row_end = row.checked_add(rowspan)?;
+                let col_end = col.checked_add(colspan)?;
+                occupied_work = occupied_work.checked_add(rowspan.checked_mul(colspan)?)?;
+                if occupied_work > MAX_OCCUPIED_CELLS {
+                    return None;
+                }
+                for r in row..row_end {
+                    for c in col..col_end {
                         occupied.insert((r, c));
                     }
                 }
-                bbox_idx += 1;
-                col += colspan;
+                bbox_idx = bbox_idx.checked_add(1)?;
+                col = col_end;
             }
             // Wrapper / informational tokens — no-op.
             _ => {}
@@ -144,7 +201,7 @@ pub(crate) fn parse_structure(tokens: &[String]) -> Vec<CellSlot> {
         i += 1;
     }
 
-    slots
+    Some(slots)
 }
 
 /// Parse an attribute fragment like ` colspan="4"` or `rowspan='2'`.
@@ -723,6 +780,64 @@ mod tests {
         assert_eq!((slots[1].row, slots[1].col), (0, 1));
         // C should be at (1, 1) because (1, 0) is occupied by A's rowspan.
         assert_eq!((slots[2].row, slots[2].col), (1, 1));
+    }
+
+    #[test]
+    fn parse_structure_rejects_rowspan_past_declared_rows() {
+        let tokens = [
+            "<table>",
+            "<tr>",
+            "<td></td>",
+            "</tr>",
+            "<tr>",
+            "<td",
+            " rowspan=\"2\"",
+            ">",
+            "</td>",
+            "</tr>",
+            "</table>",
+        ]
+        .into_iter()
+        .map(t)
+        .collect::<Vec<_>>();
+
+        assert!(parse_structure_checked(&tokens).is_none());
+
+        // The same tokens must still lay out for in-process callers: the
+        // strict parser guards the C trust boundary, it does not define
+        // what Rust and napi callers get.
+        let slots = parse_structure(&tokens);
+        assert_eq!(slots.len(), 2, "overhanging rowspan must not drop cells");
+        assert_eq!(slots[1].rowspan, 1, "overhanging rowspan clamps to fit");
+    }
+
+    #[test]
+    fn parse_structure_clamps_unparseable_and_oversized_spans() {
+        let tokens = [
+            "<table>",
+            "<tr>",
+            "<td",
+            " rowspan=\"abc\"",
+            ">",
+            "</td>",
+            "<td",
+            " colspan=\"400\"",
+            ">",
+            "</td>",
+            "</tr>",
+            "</table>",
+        ]
+        .into_iter()
+        .map(t)
+        .collect::<Vec<_>>();
+
+        // Strict rejects both; best-effort keeps every cell.
+        assert!(parse_structure_checked(&tokens).is_none());
+
+        let slots = parse_structure(&tokens);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].rowspan, 1, "unparseable rowspan falls back to 1");
+        assert_eq!(slots[1].colspan, 25, "oversized colspan clamps to the cap");
     }
 
     #[test]
