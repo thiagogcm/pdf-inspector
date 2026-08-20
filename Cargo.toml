@@ -19,6 +19,11 @@ include = [
     "/external/bcmaps/**",
     "/docs/rust-api.md",
     "/LICENSE",
+    "/pdf_inspector.h",
+    "/cbindgen.toml",
+    # Sets the cdylib's SONAME; must ship or a build from the published crate
+    # silently loses it (build.rs missing is not a build failure).
+    "/build.rs",
     # maturin derives the sdist file list from this allowlist; the stub must
     # ship so wheels built from the sdist keep their type hints.
     "/pdf_inspector.pyi",
@@ -26,7 +31,7 @@ include = [
 
 [lib]
 name = "pdf_inspector"
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 # Python bindings
@@ -92,6 +97,11 @@ render-pdfium = ["vision", "dep:firecrawl-pdfium"]
 # Complete native OCR path. This remains opt-in so default library,
 # renderer-only, and browser consumers do not inherit inference or HTTP/TLS.
 ocr = ["render-pdfium", "ocr-oar", "model-download"]
+# Opt-in like `python`: exporting the C ABI's `#[no_mangle]` symbols
+# unconditionally would leak them into every downstream link graph, including
+# the wasm bundle, and make two versions of this crate in one graph a
+# duplicate-symbol error.
+c-api = []
 
 [[bin]]
 name = "pdf2md"

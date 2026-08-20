@@ -36,6 +36,53 @@ jobs:
       - name: Test developer scripts
         run: python3 -m unittest discover -s scripts/tests
 
+  c-abi:
+    name: C ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: c-abi
+
+      - name: Install cbindgen
+        # Pin lives in the script, which also enforces it at runtime; reading
+        # it here keeps the two from drifting apart silently.
+        run: |
+          version=$(sed -n 's/^CBINDGEN_VERSION=//p' scripts/generate-c-header.sh)
+          cargo install cbindgen --version "$version" --locked
+
+      # Regenerates the header as its first step, so the drift check below
+      # covers it too -- no need to run cbindgen over the crate twice.
+      - name: Run C consumer
+        run: ./scripts/test-c-consumer.sh
+
+      - name: Verify generated header is committed
+        run: git diff --exit-code -- pdf_inspector.h
+
+      - name: ASan + UBSan C consumer
+        # Instruments only the C side of the FFI boundary (the staticlib
+        # itself is a plain, non-instrumented Rust build); Rust-side heap
+        # errors would need `-Zsanitizer=address` on nightly Rust.
+        run: |
+          ${CC:-cc} -std=c11 -g -fsanitize=address,undefined -I. tests/c_consumer.c target/release/libpdf_inspector.a -ldl -lpthread -lm -o /tmp/c-consumer-asan
+          ASAN_OPTIONS=detect_leaks=1 /tmp/c-consumer-asan
+
+      - name: Test C ABI
+        # `--release` reuses the artifacts the C consumer step just built;
+        # a debug run would recompile the whole dependency graph.
+        run: cargo test --release --features c-api --lib c_api
+
+      - name: Clippy C API
+        run: cargo clippy --features c-api -- -D warnings
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
