@@ -84,7 +84,7 @@ int main(void) {
     }
     const uint32_t page_one[] = {1};
     if (expect_error("extract_pages_markdown page one", pdf_inspector_extract_pages_markdown("tests/fixtures/bare_name_struct.pdf", page_one, 1, NULL, &pages_result), PdfInspectorError_Success) ||
-        pdf_inspector_pages_result_get_page_number(pages_result, 0) != 1) {
+        pdf_inspector_pages_result_get_entry_page_number(pages_result, 0) != 1) {
       break;
     }
 
@@ -94,22 +94,22 @@ int main(void) {
     CU32View pages_needing_ocr = {0};
     CU32View pages_with_tables = {0};
     CU32View pages_with_columns = {0};
-    if (pdf_inspector_pages_result_get_page_count(pages_result) != 1 ||
-        !pdf_inspector_pages_result_get_page_markdown(pages_result, 0, &page_markdown) ||
+    if (pdf_inspector_pages_result_get_entry_count(pages_result) != 1 ||
+        !pdf_inspector_pages_result_get_entry_markdown(pages_result, 0, &page_markdown) ||
         page_markdown.ptr == NULL ||
         // A text-based fixture needs no OCR, and reports no reason for one.
-        pdf_inspector_pages_result_get_page_needs_ocr(pages_result, 0) ||
-        pdf_inspector_pages_result_get_page_ocr_reason(pages_result, 0, &(CByteView){0}) ||
+        pdf_inspector_pages_result_get_entry_needs_ocr(pages_result, 0) ||
+        pdf_inspector_pages_result_get_entry_ocr_reason(pages_result, 0, &(CByteView){0}) ||
         pdf_inspector_pages_result_is_complex(pages_result) ||
         !pdf_inspector_pages_result_get_pages_needing_ocr(pages_result, &pages_needing_ocr) ||
         pages_needing_ocr.len != 0 ||
         !pdf_inspector_pages_result_get_pages_with_tables(pages_result, &pages_with_tables) ||
         !pdf_inspector_pages_result_get_pages_with_columns(pages_result, &pages_with_columns) ||
-        pdf_inspector_pages_result_get_ocr_reasons_count(pages_result) != 0 ||
+        pdf_inspector_pages_result_get_ocr_page_count(pages_result) != 0 ||
         // Out-of-range entries stay total: zero values, never a trap.
-        pdf_inspector_pages_result_get_ocr_reasons_page(pages_result, 0) != 0 ||
-        pdf_inspector_pages_result_get_ocr_reasons_reasons_count(pages_result, 0) != 0 ||
-        pdf_inspector_pages_result_get_ocr_reasons_reason(pages_result, 0, 0, &(CByteView){0})) {
+        pdf_inspector_pages_result_get_ocr_page_number(pages_result, 0) != 0 ||
+        pdf_inspector_pages_result_get_ocr_page_reason_count(pages_result, 0) != 0 ||
+        pdf_inspector_pages_result_get_ocr_page_reason(pages_result, 0, 0, &(CByteView){0})) {
       break;
     }
 
@@ -169,7 +169,7 @@ int main(void) {
       break;
     }
     CByteView markdown = {0};
-    if (!pdf_inspector_result_get_markdown(result, &markdown) || markdown.ptr == NULL || markdown.len < 6 || memcmp(markdown.ptr, "# Test", 6) != 0) {
+    if (!pdf_inspector_process_result_get_markdown(result, &markdown) || markdown.ptr == NULL || markdown.len < 6 || memcmp(markdown.ptr, "# Test", 6) != 0) {
       break;
     }
 
@@ -183,7 +183,7 @@ int main(void) {
         !(pdf_inspector_pdf_type_result_get_confidence(pdf_type_result) > 0.0f) ||
         !pdf_inspector_pdf_type_result_get_pages_needing_ocr(pdf_type_result, &detector_ocr_pages) ||
         detector_ocr_pages.len != 0 ||
-        pdf_inspector_pdf_type_result_get_ocr_reasons_count(pdf_type_result) != 0) {
+        pdf_inspector_pdf_type_result_get_ocr_page_count(pdf_type_result) != 0) {
       break;
     }
 
@@ -202,8 +202,8 @@ int main(void) {
     CByteView region_value = {0};
     if (expect_error("extract region text", pdf_inspector_extract_text_in_regions("tests/fixtures/bare_name_struct.pdf", page_regions, 1, NULL, &region_text), PdfInspectorError_Success) ||
         region_text == NULL ||
-        pdf_inspector_region_text_result_get_page_count(region_text) != 1 ||
-        pdf_inspector_region_text_result_get_page(region_text, 0) != 1 ||
+        pdf_inspector_region_text_result_get_entry_count(region_text) != 1 ||
+        pdf_inspector_region_text_result_get_entry_page_number(region_text, 0) != 1 ||
         pdf_inspector_region_text_result_get_region_count(region_text, 0) != 1 ||
         !pdf_inspector_region_text_result_get_text(region_text, 0, 0, &region_value) ||
         region_value.ptr == NULL || region_value.len == 0 ||
@@ -261,7 +261,7 @@ int main(void) {
     CByteView tsr_reason = {(const uint8_t *)(void *)0x1, 1};
     if (expect_error("extract TSR table", pdf_inspector_extract_tables_with_structure_auto("tests/fixtures/bits_pilani_feedback.pdf", &tsr_input, 1, NULL, &tsr_result), PdfInspectorError_Success) ||
         tsr_result == NULL ||
-        pdf_inspector_tsr_result_get_count(tsr_result) != 1 ||
+        pdf_inspector_tsr_result_get_table_count(tsr_result) != 1 ||
         !pdf_inspector_tsr_result_get_markdown(tsr_result, 0, &tsr_markdown) ||
         tsr_markdown.len != sizeof(expected_tsr) - 1 ||
         memcmp(tsr_markdown.ptr, expected_tsr, sizeof(expected_tsr) - 1) != 0 ||
@@ -276,7 +276,7 @@ int main(void) {
     CByteView raw_markdown = {0};
     int raw_rc = expect_error("extract raw TSR table", pdf_inspector_extract_tables_with_structure("tests/fixtures/bits_pilani_feedback.pdf", &tsr_input, 1, NULL, &raw_tsr), PdfInspectorError_Success);
     if (!raw_rc &&
-        (pdf_inspector_tsr_result_get_count(raw_tsr) != 1 ||
+        (pdf_inspector_tsr_result_get_table_count(raw_tsr) != 1 ||
          !pdf_inspector_tsr_result_get_markdown(raw_tsr, 0, &raw_markdown) ||
          raw_markdown.len != sizeof(expected_tsr) - 1 ||
          memcmp(raw_markdown.ptr, expected_tsr, sizeof(expected_tsr) - 1) != 0 ||
@@ -504,21 +504,21 @@ int main(void) {
     // Document-level metadata on the full processing result.
     CU32View result_tables = {0};
     CU32View result_columns = {0};
-    if (pdf_inspector_result_get_type(result) != CPdfType_TextBased ||
-        pdf_inspector_result_get_page_count(result) == 0 ||
-        pdf_inspector_result_get_confidence(result) < 0.0f ||
-        pdf_inspector_result_get_confidence(result) > 1.0f ||
-        pdf_inspector_result_has_encoding_issues(result) ||
-        pdf_inspector_result_is_complex_layout(result) ||
-        !pdf_inspector_result_get_pages_with_tables(result, &result_tables) ||
-        !pdf_inspector_result_get_pages_with_columns(result, &result_columns) ||
-        pdf_inspector_result_get_ocr_reasons_count(result) != 0 ||
-        pdf_inspector_result_get_ocr_reasons_page(result, 0) != 0 ||
-        pdf_inspector_result_get_ocr_reasons_reasons_count(result, 0) != 0) {
+    if (pdf_inspector_process_result_get_type(result) != CPdfType_TextBased ||
+        pdf_inspector_process_result_get_page_count(result) == 0 ||
+        pdf_inspector_process_result_get_confidence(result) < 0.0f ||
+        pdf_inspector_process_result_get_confidence(result) > 1.0f ||
+        pdf_inspector_process_result_has_encoding_issues(result) ||
+        pdf_inspector_process_result_is_complex_layout(result) ||
+        !pdf_inspector_process_result_get_pages_with_tables(result, &result_tables) ||
+        !pdf_inspector_process_result_get_pages_with_columns(result, &result_columns) ||
+        pdf_inspector_process_result_get_ocr_page_count(result) != 0 ||
+        pdf_inspector_process_result_get_ocr_page_number(result, 0) != 0 ||
+        pdf_inspector_process_result_get_ocr_page_reason_count(result, 0) != 0) {
       break;
     }
     // `processing_time_ms` is a duration, so only its readability is asserted.
-    (void)pdf_inspector_result_get_processing_time_ms(result);
+    (void)pdf_inspector_process_result_get_processing_time_ms(result);
 
     // Byte-scan page estimate, without parsing the document.
     uint32_t estimated_pages = 0;
@@ -528,6 +528,51 @@ int main(void) {
         estimated_pages != 0 ||
         expect_error("estimate page count", pdf_inspector_estimate_page_count_from_bytes(estimate_garbage, sizeof(estimate_garbage) - 1, &estimated_pages), PdfInspectorError_Success)) {
       break;
+    }
+
+    // The copy-out diagnostic path: full length like snprintf, the originating
+    // code, and no write past `cap`.
+    {
+      CPdfProcessResult *bad = NULL;
+      const uint8_t junk[] = "definitely not a pdf";
+      if (expect_error("process junk bytes", pdf_inspector_process_pdf_mem(junk, sizeof(junk) - 1, NULL, &bad), PdfInspectorError_NotAPdf)) {
+        break;
+      }
+      int32_t code = -1;
+      size_t need = pdf_inspector_last_error_copy(NULL, 0, &code);
+      CByteView borrowed = {0};
+      if (need == 0 || code != PdfInspectorError_NotAPdf ||
+          !pdf_inspector_last_error_message(&borrowed) || borrowed.len != need) {
+        break;
+      }
+      unsigned char small[8];
+      memset(small, 0xAA, sizeof(small));
+      // Clamp so this stays a truncation test regardless of the message length.
+      size_t cap = need < sizeof(small) / 2 ? need : sizeof(small) / 2;
+      if (pdf_inspector_last_error_copy(small, cap, NULL) != need ||
+          memcmp(small, borrowed.ptr, cap) != 0 ||
+          small[cap] != 0xAA) {  // nothing written past `cap`
+        break;
+      }
+    }
+
+    // A handle passed to the wrong `*_free` is refused, not freed. In C this
+    // needs a cast to even compile -- which is the point: a binding generator
+    // that erases the pointer types gets the same protection for free.
+    {
+      CTextResult *victim = NULL;
+      CByteView still_there = {0};
+      if (expect_error("extract text for wrong-free check", pdf_inspector_extract_text("tests/fixtures/bare_name_struct.pdf", NULL, &victim), PdfInspectorError_Success)) {
+        break;
+      }
+      pdf_inspector_process_result_free((CPdfProcessResult *)(void *)victim);
+      pdf_inspector_options_free((CPdfOptions *)(void *)victim);
+      if (!pdf_inspector_text_result_get_text(victim, &still_there) ||
+          still_there.len == 0) {
+        pdf_inspector_text_result_free(victim);
+        break;
+      }
+      pdf_inspector_text_result_free(victim);
     }
 
     // No message after a success.
@@ -566,7 +611,7 @@ int main(void) {
   pdf_inspector_text_result_free(markdown_result);
   pdf_inspector_text_result_free(text_result);
   pdf_inspector_pages_result_free(pages_result);
-  pdf_inspector_result_free(result);
+  pdf_inspector_process_result_free(result);
   pdf_inspector_options_free(options);
   return rc;
 }

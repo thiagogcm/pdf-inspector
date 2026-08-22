@@ -8,8 +8,12 @@
 //! stated once here instead of on each entry point:
 //!
 //! - **Handles are opaque and owned by the caller.** Each handle is released by
-//!   its matching `*_free`, exactly once. Passing a handle to any other `*_free`
-//!   is undefined behaviour.
+//!   its matching `*_free`, exactly once. Each handle carries a type tag, so
+//!   passing one to a different `*_free`, or to a getter belonging to another
+//!   handle type, is detected and ignored rather than reinterpreting foreign
+//!   memory. Freeing the same handle twice is still undefined behaviour — a
+//!   freed block is commonly reused by another handle of the same type, whose
+//!   tag then matches, so the check offers no protection there at all.
 //! - **Returned [`CByteView`] / [`CU32View`] pointers are borrowed**, never
 //!   freed by the caller, and valid only until the owning handle is freed.
 //!   String bytes are UTF-8 and *not* NUL-terminated. A NULL view pointer means
@@ -204,7 +208,7 @@ fn map_error(err: crate::PdfError) -> PdfInspectorError {
         crate::PdfError::InvalidStructure => (None, PdfInspectorError::InvalidStructure),
         crate::PdfError::NotAPdf(msg) => (Some(msg), PdfInspectorError::NotAPdf),
     };
-    set_last_error(message);
+    set_last_error(code, message);
     code
 }
 
@@ -212,18 +216,46 @@ fn map_error(err: crate::PdfError) -> PdfInspectorError {
 // Last-error diagnostics
 // =========================================================================
 
+/// The diagnostic behind one failed call: the code that produced it and its
+/// message. The code lets a caller check that the message it just read belongs
+/// to the failure it just saw — see `pdf_inspector_last_error_copy`.
+struct LastError {
+    code: PdfInspectorError,
+    message: String,
+}
+
 thread_local! {
-    // Belongs to the calling thread's most recent entry-point call; see the
-    // module-level "Error diagnostics" section.
-    static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    // Belongs to the calling *OS* thread's most recent entry-point call; see
+    // the module-level "Error diagnostics" section, and the M:N caveat there.
+    static LAST_ERROR: RefCell<Option<LastError>> = const { RefCell::new(None) };
 }
 
 fn clear_last_error() {
     LAST_ERROR.with(|slot| *slot.borrow_mut() = None);
 }
 
-fn set_last_error(message: Option<String>) {
-    LAST_ERROR.with(|slot| *slot.borrow_mut() = message);
+/// Record the code a failing call returned when nothing inside it recorded a
+/// diagnostic, so `pdf_inspector_last_error_copy` always reports the code that
+/// actually came back. Most `PdfInspectorError` variants carry no text; without
+/// this, `code_out` would read `Success` after a genuine failure and the
+/// documented "compare it against your call's code" check would misfire on
+/// every one of them.
+fn record_error_code(code: PdfInspectorError) {
+    LAST_ERROR.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(LastError {
+                code,
+                message: String::new(),
+            });
+        }
+    });
+}
+
+fn set_last_error(code: PdfInspectorError, message: Option<String>) {
+    LAST_ERROR.with(|slot| {
+        *slot.borrow_mut() = message.map(|message| LastError { code, message });
+    });
 }
 
 fn c_pdf_type(pdf_type: crate::PdfType) -> CPdfType {
@@ -451,66 +483,133 @@ pub struct CTsrStructuredCell {
     pub page_pt_bbox: CRegion,
 }
 
+/// FFI wrapper around `PdfOptions`. A wrapper rather than the crate type
+/// directly so the handle can carry a type tag like every other handle.
+#[repr(C)]
+pub struct CPdfOptions {
+    tag: u32,
+    inner: crate::PdfOptions,
+}
+
 /// FFI wrapper around `PdfProcessResult`.
+#[repr(C)]
 pub struct CPdfProcessResult {
+    tag: u32,
     inner: crate::PdfProcessResult,
 }
 
 /// FFI wrapper around `PdfClassification`. `inner.pages_needing_ocr` is
 /// normalised to 1-indexed at construction so the zero-copy getter can hand
 /// back a borrowed slice.
+#[repr(C)]
 pub struct CPdfClassification {
+    tag: u32,
     inner: crate::PdfClassification,
 }
 
 /// FFI wrapper around the full detector's `PdfTypeResult`. OCR reasons are
 /// normalised from an ordered map to a vector for stable indexed traversal.
+#[repr(C)]
 pub struct CPdfTypeResult {
+    tag: u32,
     inner: crate::PdfTypeResult,
     ocr_reasons_by_page: Vec<crate::PageOcrReasons>,
 }
 
 /// FFI wrapper around `PagesExtractionResult`.
+#[repr(C)]
 pub struct CPagesExtractionResult {
+    tag: u32,
     inner: crate::PagesExtractionResult,
 }
 
 /// FFI wrapper around extracted plain text.
+#[repr(C)]
 pub struct CTextResult {
+    tag: u32,
     text: String,
 }
 
 /// FFI wrapper around positioned text items.
+#[repr(C)]
 pub struct CTextItemsResult {
+    tag: u32,
     items: Vec<crate::TextItem>,
 }
 
 /// FFI wrapper around tagged-PDF structure-tree elements.
+#[repr(C)]
 pub struct CStructureElementsResult {
+    tag: u32,
     elements: Vec<crate::StructureElement>,
 }
 
 /// FFI wrapper around region-based text extraction results.
+#[repr(C)]
 pub struct CRegionTextResult {
+    tag: u32,
     pages: Vec<crate::PageRegionResult>,
 }
 
 /// FFI wrapper around an optional `VectorGridDetection`. A successful call
 /// always returns a handle; use `pdf_inspector_vector_grid_result_is_detected`
 /// to distinguish a detected grid from a valid no-grid result.
+#[repr(C)]
 pub struct CVectorGridResult {
+    tag: u32,
     detection: Option<crate::VectorGridDetection>,
 }
 
 /// FFI wrapper around auto-fallback TSR table extraction results.
+#[repr(C)]
 pub struct CTsrTableExtractionResult {
+    tag: u32,
     results: Vec<crate::TableExtractionResult>,
 }
 
 /// FFI wrapper around raw TSR structured-cell results, one cell list per
 /// input descriptor in input order.
+#[repr(C)]
 pub struct CTsrStructuredCellsResult {
+    tag: u32,
     tables: Vec<Vec<crate::tables::StructuredCell>>,
+}
+
+/// Every handle stores its own tag as its first field, so `free_handle` can
+/// reject a handle handed to the wrong `*_free`.
+///
+/// In C that mistake is a compile error — the `*_free` functions take distinct
+/// pointer types, and `tests/c_consumer.c` builds under `-Werror`. Binding
+/// generators erase that: jextract, cgo, and P/Invoke all render every opaque
+/// handle as one untyped pointer type, so the same mistake compiles cleanly
+/// and corrupts the heap. The tag turns it into a detectable no-op.
+trait Handle: Sized {
+    const TAG: u32;
+}
+
+macro_rules! impl_handles {
+    ($($ty:ident = $tag:expr),+ $(,)?) => {$(
+        impl Handle for $ty {
+            const TAG: u32 = $tag;
+        }
+    )+};
+}
+
+// Arbitrary but fixed and distinct. The high byte keeps them clear of small
+// integers, so a zeroed or freshly-`malloc`ed block is unlikely to match.
+impl_handles! {
+    CPdfOptions = 0xDF00_0001u32,
+    CPdfProcessResult = 0xDF00_0002u32,
+    CPdfClassification = 0xDF00_0003u32,
+    CPdfTypeResult = 0xDF00_0004u32,
+    CPagesExtractionResult = 0xDF00_0005u32,
+    CTextResult = 0xDF00_0006u32,
+    CTextItemsResult = 0xDF00_0007u32,
+    CStructureElementsResult = 0xDF00_0008u32,
+    CRegionTextResult = 0xDF00_0009u32,
+    CVectorGridResult = 0xDF00_000Au32,
+    CTsrTableExtractionResult = 0xDF00_000Bu32,
+    CTsrStructuredCellsResult = 0xDF00_000Cu32,
 }
 
 type RegionRequests = Vec<(u32, Vec<[f32; 4]>)>;
@@ -530,9 +629,12 @@ where
     clear_last_error();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(Ok(())) => PdfInspectorError::Success,
-        Ok(Err(err)) => err,
+        Ok(Err(err)) => {
+            record_error_code(err);
+            err
+        }
         Err(payload) => {
-            set_last_error(panic_message(&payload));
+            set_last_error(PdfInspectorError::Panic, panic_message(&payload));
             PdfInspectorError::Panic
         }
     }
@@ -554,31 +656,64 @@ fn read_pdf_file(path: &str) -> Result<Vec<u8>, PdfInspectorError> {
     std::fs::read(path).map_err(|error| map_error(error.into()))
 }
 
+/// Borrow a handle after proving its type tag, or `None` for a NULL or
+/// mistagged pointer.
+///
+/// The tag is read as a bare `u32` from the front of the allocation *before*
+/// any reference is formed. Forming the `&T` first would assert that
+/// `size_of::<T>()` bytes are readable, which is out of bounds when the
+/// pointer is really a smaller handle — the exact mix-up the tag exists to
+/// catch. Every handle is `#[repr(C)]` with `tag` first and is at least four
+/// bytes, so the read itself is in bounds for any of them.
+unsafe fn handle_ref<'a, T: Handle>(ptr: *const T) -> Option<&'a T> {
+    if ptr.is_null() || ptr.cast::<u32>().read() != T::TAG {
+        return None;
+    }
+    Some(&*ptr)
+}
+
+/// [`handle_ref`] for a mutable borrow.
+unsafe fn handle_mut<'a, T: Handle>(ptr: *mut T) -> Option<&'a mut T> {
+    if ptr.is_null() || ptr.cast::<u32>().read() != T::TAG {
+        return None;
+    }
+    Some(&mut *ptr)
+}
+
 /// Drop a `Box`-allocated handle, tolerating NULL and swallowing panics.
-unsafe fn free_boxed<T>(ptr: *mut T) {
+///
+/// A handle whose tag does not match `T` was handed to the wrong `*_free`;
+/// dropping it as a `T` would corrupt the heap, so this leaves it alone
+/// instead. That leaks rather than crashes, which is the better failure for a
+/// mistake a binding generator cannot catch at compile time — see [`Handle`].
+unsafe fn free_handle<T: Handle>(ptr: *mut T) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if !ptr.is_null() {
-            let _ = Box::from_raw(ptr);
+        if handle_ref(ptr.cast_const()).is_none() {
+            return;
         }
+        drop(Box::from_raw(ptr));
     }));
 }
 
 /// Mutate `options` under a panic guard, rejecting a NULL handle.
 unsafe fn with_options(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     f: impl FnOnce(&mut crate::PdfOptions) -> Result<(), PdfInspectorError>,
 ) -> PdfInspectorError {
     catch_panic_err(|| {
-        let Some(opts) = options.as_mut() else {
+        if options.is_null() {
             return Err(PdfInspectorError::NullPointer);
+        }
+        let Some(opts) = handle_mut(options) else {
+            return Err(PdfInspectorError::InvalidArgument);
         };
-        f(opts)
+        f(&mut opts.inner)
     })
 }
 
 /// `with_options` for setters that cannot fail once the handle is valid.
 unsafe fn set_option(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     f: impl FnOnce(&mut crate::PdfOptions),
 ) -> PdfInspectorError {
     with_options(options, |opts| {
@@ -605,21 +740,27 @@ unsafe fn emit_handle<T>(
     })
 }
 
-unsafe fn options_or_default(options: *const crate::PdfOptions) -> crate::PdfOptions {
-    options.as_ref().cloned().unwrap_or_default()
+/// Borrow a caller's options, or `None` for a NULL or mistagged handle.
+/// A mistagged handle falls back to defaults rather than reading another
+/// handle type's memory as `PdfOptions`.
+unsafe fn options_ref<'a>(options: *const CPdfOptions) -> Option<&'a crate::PdfOptions> {
+    handle_ref(options).map(|options| &options.inner)
 }
 
-unsafe fn markdown_options_or_default(options: *const crate::PdfOptions) -> crate::MarkdownOptions {
-    options
-        .as_ref()
+unsafe fn options_or_default(options: *const CPdfOptions) -> crate::PdfOptions {
+    options_ref(options).cloned().unwrap_or_default()
+}
+
+unsafe fn markdown_options_or_default(options: *const CPdfOptions) -> crate::MarkdownOptions {
+    options_ref(options)
         .map(|options| options.markdown.clone())
         .unwrap_or_default()
 }
 
 unsafe fn detection_options_or_default(
-    options: *const crate::PdfOptions,
+    options: *const CPdfOptions,
 ) -> (crate::detector::DetectionConfig, Option<String>) {
-    options.as_ref().map_or_else(Default::default, |options| {
+    options_ref(options).map_or_else(Default::default, |options| {
         (options.detection.clone(), options.password.clone())
     })
 }
@@ -1034,7 +1175,7 @@ unsafe fn with_result<R>(
     default: R,
     f: impl FnOnce(&crate::PdfProcessResult) -> R,
 ) -> R {
-    result.as_ref().map_or(default, |result| f(&result.inner))
+    handle_ref(result).map_or(default, |result| f(&result.inner))
 }
 
 unsafe fn with_classification<R>(
@@ -1042,9 +1183,7 @@ unsafe fn with_classification<R>(
     default: R,
     f: impl FnOnce(&crate::PdfClassification) -> R,
 ) -> R {
-    classification
-        .as_ref()
-        .map_or(default, |classification| f(&classification.inner))
+    handle_ref(classification).map_or(default, |classification| f(&classification.inner))
 }
 
 unsafe fn with_pdf_type_result<R>(
@@ -1052,13 +1191,14 @@ unsafe fn with_pdf_type_result<R>(
     default: R,
     f: impl FnOnce(&CPdfTypeResult) -> R,
 ) -> R {
-    result.as_ref().map_or(default, f)
+    handle_ref(result).map_or(default, f)
 }
 
 fn c_full_detection_result(mut inner: crate::PdfTypeResult) -> CPdfTypeResult {
     let ocr_reasons_by_page =
         crate::page_ocr_reasons_vec(std::mem::take(&mut inner.ocr_reasons_by_page));
     CPdfTypeResult {
+        tag: CPdfTypeResult::TAG,
         inner,
         ocr_reasons_by_page,
     }
@@ -1069,7 +1209,7 @@ unsafe fn with_pages_result<R>(
     default: R,
     f: impl FnOnce(&crate::PagesExtractionResult) -> R,
 ) -> R {
-    result.as_ref().map_or(default, |result| f(&result.inner))
+    handle_ref(result).map_or(default, |result| f(&result.inner))
 }
 
 unsafe fn with_page<R>(
@@ -1078,8 +1218,7 @@ unsafe fn with_page<R>(
     default: R,
     f: impl FnOnce(&crate::PageMarkdown) -> R,
 ) -> R {
-    result
-        .as_ref()
+    handle_ref(result)
         .and_then(|result| result.inner.pages.get(index))
         .map_or(default, f)
 }
@@ -1090,8 +1229,7 @@ unsafe fn with_structure_element<R>(
     default: R,
     f: impl FnOnce(&crate::StructureElement) -> R,
 ) -> R {
-    result
-        .as_ref()
+    handle_ref(result)
         .and_then(|result| result.elements.get(index))
         .map_or(default, f)
 }
@@ -1102,8 +1240,7 @@ unsafe fn with_region_page<R>(
     default: R,
     f: impl FnOnce(&crate::PageRegionResult) -> R,
 ) -> R {
-    result
-        .as_ref()
+    handle_ref(result)
         .and_then(|result| result.pages.get(page_index))
         .map_or(default, f)
 }
@@ -1115,8 +1252,7 @@ unsafe fn with_region<R>(
     default: R,
     f: impl FnOnce(&crate::RegionText) -> R,
 ) -> R {
-    result
-        .as_ref()
+    handle_ref(result)
         .and_then(|result| result.pages.get(page_index))
         .and_then(|page| page.regions.get(region_index))
         .map_or(default, f)
@@ -1130,11 +1266,11 @@ unsafe fn with_region<R>(
 /// helpers. They are written out rather than macro-generated because cbindgen
 /// parses this file as source: a macro would compile fine and silently drop
 /// all twelve from the generated header.
-unsafe fn ocr_reason_entries<'a, H: 'a>(
+unsafe fn ocr_reason_entries<'a, H: Handle + 'a>(
     result: *const H,
     entries: impl FnOnce(&'a H) -> &'a [crate::PageOcrReasons],
 ) -> Option<&'a [crate::PageOcrReasons]> {
-    result.as_ref().map(entries)
+    handle_ref(result).map(entries)
 }
 
 /// One OCR-reason entry, or `None` for a NULL handle or out-of-range index.
@@ -1161,8 +1297,8 @@ pub extern "C" fn pdf_inspector_abi_minor() -> u32 {
     PDF_INSPECTOR_ABI_MINOR
 }
 
-/// Map one OCR-reason string, as returned by any of the `_get_ocr_reasons_reason`
-/// getters or `pdf_inspector_pages_result_get_page_ocr_reason`, to a
+/// Map one OCR-reason string, as returned by any of the `_get_ocr_reason`
+/// getters or `pdf_inspector_pages_result_get_entry_ocr_reason`, to a
 /// `COcrReason` discriminant. Returns `COcrReason_Unknown` for a reason this
 /// library does not define, which spares callers a table of string literals.
 #[no_mangle]
@@ -1207,9 +1343,78 @@ pub unsafe extern "C" fn pdf_inspector_estimate_page_count_from_bytes(
 /// and zeroes `out` if that call succeeded or left no diagnostic text. Getters
 /// and `*_free` never touch this slot. The view stays valid until the next
 /// fallible entry-point call on this thread.
+///
+/// # Not safe from an M:N runtime
+///
+/// The slot is keyed to the **OS thread**. Callers whose unit of work is not
+/// an OS thread — Java virtual threads, Go goroutines without
+/// `runtime.LockOSThread`, .NET `async` continuations — must use
+/// [`pdf_inspector_last_error_copy`] instead. Another task sharing this OS
+/// thread can overwrite the slot between the failing call and this one, and
+/// because that frees the string, the returned view can dangle. See the
+/// "Error diagnostics" section of `docs/c-api.md`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_last_error_message(out: *mut CByteView) -> bool {
-    LAST_ERROR.with(|slot| byte_view_out(slot.borrow().as_deref(), out))
+    LAST_ERROR.with(|slot| {
+        byte_view_out(
+            slot.borrow()
+                .as_ref()
+                .filter(|error| !error.message.is_empty())
+                .map(|error| error.message.as_str()),
+            out,
+        )
+    })
+}
+
+/// Copy the most recent diagnostic on the calling thread into `buf`, and
+/// write the error code that produced it to `code_out` (may be NULL).
+///
+/// Returns the diagnostic's **full** length in bytes, as `snprintf` does, so a
+/// return greater than `cap` means the copy was truncated and the return value
+/// is the buffer size needed. Returns 0 when the last fallible call succeeded
+/// or left no diagnostic text. The bytes are UTF-8 and not NUL-terminated;
+/// `buf` may be NULL only when `cap` is zero, which is how you ask for the
+/// length alone.
+///
+/// # Prefer this over `pdf_inspector_last_error_message` off an M:N runtime
+///
+/// [`pdf_inspector_last_error_message`] hands back a pointer into the
+/// thread-local slot, which stays valid only until this OS thread's next
+/// fallible call. When the caller's unit of work is not an OS thread — a Java
+/// virtual thread, a goroutine, a .NET `async` continuation — another task can
+/// share the same OS thread and free that string underneath the pointer.
+///
+/// This entry point reads *and* copies inside a single call, so no other task
+/// can interleave: the diagnostic either arrives intact or does not arrive.
+/// That removes the dangling read, but not the possibility of reading a
+/// *different* task's diagnostic. `code_out` is what discriminates: it always
+/// carries the code the recorded call returned, whether or not that call left
+/// any text, so `code_out` matching the code you just got back means the slot
+/// is yours — a length of 0 then simply means your error carries no message.
+/// A mismatch means another task overwrote it. `PdfInspectorError_Success`
+/// appears only when the slot is genuinely empty.
+#[no_mangle]
+pub unsafe extern "C" fn pdf_inspector_last_error_copy(
+    buf: *mut u8,
+    cap: usize,
+    code_out: *mut i32,
+) -> usize {
+    LAST_ERROR.with(|slot| {
+        let slot = slot.borrow();
+        let error = slot.as_ref();
+        if let Some(code_out) = code_out.as_mut() {
+            *code_out = error.map_or(PdfInspectorError::Success, |error| error.code) as i32;
+        }
+        let Some(error) = error else {
+            return 0;
+        };
+        let message = error.message.as_bytes();
+        let copied = message.len().min(cap);
+        if copied > 0 && !buf.is_null() {
+            std::ptr::copy_nonoverlapping(message.as_ptr(), buf, copied);
+        }
+        message.len()
+    })
 }
 
 /// Create a new options handle with default settings, published through
@@ -1222,22 +1427,27 @@ pub unsafe extern "C" fn pdf_inspector_last_error_message(out: *mut CByteView) -
 /// and not a stale one.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_new(
-    options_out: *mut *mut crate::PdfOptions,
+    options_out: *mut *mut CPdfOptions,
 ) -> PdfInspectorError {
-    emit_handle(options_out, || Ok(crate::PdfOptions::default()))
+    emit_handle(options_out, || {
+        Ok(CPdfOptions {
+            tag: CPdfOptions::TAG,
+            inner: crate::PdfOptions::default(),
+        })
+    })
 }
 
-/// Free a `PdfOptions` instance.
+/// Free a `CPdfOptions` instance.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_options_free(options: *mut crate::PdfOptions) {
-    free_boxed(options);
+pub unsafe extern "C" fn pdf_inspector_options_free(options: *mut CPdfOptions) {
+    free_handle(options);
 }
 
 /// Set the processing mode to a `CProcessMode` value.
 /// Out-of-range values are rejected with `InvalidArgument`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_mode(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     mode: i32,
 ) -> PdfInspectorError {
     with_options(options, |opts| {
@@ -1253,7 +1463,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_mode(
 /// Pass NULL to clear the password.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_password(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     password: *const c_char,
 ) -> PdfInspectorError {
     with_options(options, |opts| {
@@ -1266,7 +1476,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_password(
 /// Page 0 has no 1-indexed meaning and is rejected with `InvalidArgument`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_add_page(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     page: u32,
 ) -> PdfInspectorError {
     with_options(options, |opts| {
@@ -1283,7 +1493,7 @@ pub unsafe extern "C" fn pdf_inspector_options_add_page(
 /// Clear the page filter, restoring processing of every page.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_clear_pages(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.page_filter = None)
 }
@@ -1291,7 +1501,7 @@ pub unsafe extern "C" fn pdf_inspector_options_clear_pages(
 /// Set whether to detect headers by font size.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_detect_headers(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.detect_headers = enable)
@@ -1300,7 +1510,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_detect_headers(
 /// Set whether to detect list items.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_detect_lists(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.detect_lists = enable)
@@ -1309,7 +1519,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_detect_lists(
 /// Set whether to detect code blocks.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_detect_code(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.detect_code = enable)
@@ -1318,7 +1528,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_detect_code(
 /// Set whether to remove standalone page numbers.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_remove_page_numbers(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.remove_page_numbers = enable)
@@ -1327,7 +1537,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_remove_page_numbers(
 /// Set whether to convert URLs to markdown links.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_format_urls(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.format_urls = enable)
@@ -1336,7 +1546,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_format_urls(
 /// Set whether to fix hyphenation (broken words across lines).
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_fix_hyphenation(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.fix_hyphenation = enable)
@@ -1345,7 +1555,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_fix_hyphenation(
 /// Set whether to detect and format bold text.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_detect_bold(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.detect_bold = enable)
@@ -1354,7 +1564,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_detect_bold(
 /// Set whether to detect and format italic text.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_detect_italic(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.detect_italic = enable)
@@ -1363,7 +1573,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_detect_italic(
 /// Set whether to emit `<u>` runs for text with an underline.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_detect_underline(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.detect_underline = enable)
@@ -1372,7 +1582,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_detect_underline(
 /// Set whether to include image placeholders in output.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_include_images(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.include_images = enable)
@@ -1381,7 +1591,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_include_images(
 /// Set whether to include extracted hyperlinks.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_include_links(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.include_links = enable)
@@ -1390,7 +1600,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_include_links(
 /// Set whether to insert page break markers (<!-- Page N -->) between pages.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_include_page_numbers(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.include_page_numbers = enable)
@@ -1399,7 +1609,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_include_page_numbers(
 /// Set whether to strip repeated headers/footers.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_strip_headers_footers(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     enable: bool,
 ) -> PdfInspectorError {
     set_option(options, |opts| opts.markdown.strip_headers_footers = enable)
@@ -1409,7 +1619,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_strip_headers_footers(
 /// Out-of-range values are rejected with `InvalidArgument`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_profile(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     profile: i32,
 ) -> PdfInspectorError {
     with_options(options, |opts| {
@@ -1424,7 +1634,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_profile(
 /// Set minimum text operator count per page to consider as text-based.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_min_text_ops_per_page(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     count: u32,
 ) -> PdfInspectorError {
     set_option(options, |opts| {
@@ -1436,7 +1646,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_min_text_ops_per_page(
 /// Only finite values in the inclusive range `0.0..=1.0` are accepted.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_text_page_ratio_threshold(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     threshold: f32,
 ) -> PdfInspectorError {
     with_options(options, |opts| {
@@ -1457,7 +1667,7 @@ pub unsafe extern "C" fn pdf_inspector_options_set_text_page_ratio_threshold(
 /// Out-of-range `strategy` values are rejected with `InvalidArgument`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_scan_strategy(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     strategy: i32,
     sample_size: u32,
     pages: *const u32,
@@ -1509,7 +1719,7 @@ const MIN_BASE_FONT_SIZE: f32 = 1.0;
 /// are rejected with `InvalidArgument`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_options_set_base_font_size(
-    options: *mut crate::PdfOptions,
+    options: *mut CPdfOptions,
     size: f32,
 ) -> PdfInspectorError {
     with_options(options, |opts| {
@@ -1528,37 +1738,43 @@ pub unsafe extern "C" fn pdf_inspector_options_set_base_font_size(
 /// Process a PDF file with options.
 /// Returns Success on success and populates `result_out` with an opaque `CPdfProcessResult` pointer.
 /// If `options` is NULL, default options are used.
-/// The output result must be freed using `pdf_inspector_result_free`.
+/// The output result must be freed using `pdf_inspector_process_result_free`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_process_pdf(
     path: *const c_char,
-    options: *const crate::PdfOptions,
+    options: *const CPdfOptions,
     result_out: *mut *mut CPdfProcessResult,
 ) -> PdfInspectorError {
     emit_handle(result_out, || {
         let path = str_from_ffi(path)?;
         let inner = crate::process_pdf_with_options(path, options_or_default(options))
             .map_err(map_error)?;
-        Ok(CPdfProcessResult { inner })
+        Ok(CPdfProcessResult {
+            tag: CPdfProcessResult::TAG,
+            inner,
+        })
     })
 }
 
 /// Process PDF bytes with options. A NULL buffer is accepted only when `size` is zero.
 /// Returns Success on success and populates `result_out` with an opaque `CPdfProcessResult` pointer.
 /// If `options` is NULL, default options are used.
-/// The output result must be freed using `pdf_inspector_result_free`.
+/// The output result must be freed using `pdf_inspector_process_result_free`.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_process_pdf_mem(
     buffer: *const u8,
     size: usize,
-    options: *const crate::PdfOptions,
+    options: *const CPdfOptions,
     result_out: *mut *mut CPdfProcessResult,
 ) -> PdfInspectorError {
     emit_handle(result_out, || {
         let buffer = bytes_from_ffi(buffer, size)?;
         let inner = crate::process_pdf_mem_with_options(buffer, options_or_default(options))
             .map_err(map_error)?;
-        Ok(CPdfProcessResult { inner })
+        Ok(CPdfProcessResult {
+            tag: CPdfProcessResult::TAG,
+            inner,
+        })
     })
 }
 
@@ -1569,7 +1785,7 @@ pub unsafe extern "C" fn pdf_inspector_process_pdf_mem(
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_detect_pdf_type(
     path: *const c_char,
-    options: *const crate::PdfOptions,
+    options: *const CPdfOptions,
     result_out: *mut *mut CPdfTypeResult,
 ) -> PdfInspectorError {
     emit_handle(result_out, || {
@@ -1594,7 +1810,7 @@ pub unsafe extern "C" fn pdf_inspector_detect_pdf_type(
 pub unsafe extern "C" fn pdf_inspector_detect_pdf_type_mem(
     buffer: *const u8,
     size: usize,
-    options: *const crate::PdfOptions,
+    options: *const CPdfOptions,
     result_out: *mut *mut CPdfTypeResult,
 ) -> PdfInspectorError {
     emit_handle(result_out, || {
@@ -1658,7 +1874,10 @@ fn classify(
     for page in &mut inner.pages_needing_ocr {
         *page = page.saturating_add(1);
     }
-    Ok(CPdfClassification { inner })
+    Ok(CPdfClassification {
+        tag: CPdfClassification::TAG,
+        inner,
+    })
 }
 
 /// Convert UTF-8 plain text to basic Markdown. A NULL `text` pointer is
@@ -1670,14 +1889,17 @@ fn classify(
 pub unsafe extern "C" fn pdf_inspector_to_markdown(
     text: *const u8,
     size: usize,
-    options: *const crate::PdfOptions,
+    options: *const CPdfOptions,
     result_out: *mut *mut CTextResult,
 ) -> PdfInspectorError {
     emit_handle(result_out, || {
         let text = bytes_from_ffi(text, size)?;
         let text = std::str::from_utf8(text).map_err(|_| PdfInspectorError::InvalidUtf8)?;
         let markdown = crate::to_markdown(text, markdown_options_or_default(options));
-        Ok(CTextResult { text: markdown })
+        Ok(CTextResult {
+            tag: CTextResult::TAG,
+            text: markdown,
+        })
     })
 }
 
@@ -1705,12 +1927,15 @@ pub unsafe extern "C" fn pdf_inspector_to_markdown_from_items(
     rects: *const CPdfRect,
     rects_count: usize,
     document_page_count: u32,
-    options: *const crate::PdfOptions,
+    options: *const CPdfOptions,
     result_out: *mut *mut CTextResult,
 ) -> PdfInspectorError {
     emit_handle(result_out, || {
-        let Some(items) = items.as_ref() else {
+        if items.is_null() {
             return Err(PdfInspectorError::NullPointer);
+        }
+        let Some(items) = handle_ref(items) else {
+            return Err(PdfInspectorError::InvalidArgument);
         };
         let rects = pdf_rects_from_ffi(rects, rects_count)?;
         let options = markdown_options_or_default(options);
@@ -1724,7 +1949,10 @@ pub unsafe extern "C" fn pdf_inspector_to_markdown_from_items(
                 document_page_count,
             )
         };
-        Ok(CTextResult { text: markdown })
+        Ok(CTextResult {
+            tag: CTextResult::TAG,
+            text: markdown,
+        })
     })
 }
 
@@ -1744,7 +1972,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_text(
         let password = password_from_ffi(password)?;
         let text =
             crate::extractor::extract_text_with_password(path, password).map_err(map_error)?;
-        Ok(CTextResult { text })
+        Ok(CTextResult {
+            tag: CTextResult::TAG,
+            text,
+        })
     })
 }
 
@@ -1765,7 +1996,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_text_mem(
         let password = password_from_ffi(password)?;
         let text = crate::extractor::extract_text_mem_with_password(buffer, password)
             .map_err(map_error)?;
-        Ok(CTextResult { text })
+        Ok(CTextResult {
+            tag: CTextResult::TAG,
+            text,
+        })
     })
 }
 
@@ -1792,7 +2026,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_text_with_positions(
             password,
         )
         .map_err(map_error)?;
-        Ok(CTextItemsResult { items })
+        Ok(CTextItemsResult {
+            tag: CTextItemsResult::TAG,
+            items,
+        })
     })
 }
 
@@ -1820,7 +2057,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_text_with_positions_mem(
             password,
         )
         .map_err(map_error)?;
-        Ok(CTextItemsResult { items })
+        Ok(CTextItemsResult {
+            tag: CTextItemsResult::TAG,
+            items,
+        })
     })
 }
 
@@ -1845,7 +2085,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_structure_elements(
         let password = password_from_ffi(password)?;
         let elements = crate::extract_structure_elements_with_password(path, pages, password)
             .map_err(map_error)?;
-        Ok(CStructureElementsResult { elements })
+        Ok(CStructureElementsResult {
+            tag: CStructureElementsResult::TAG,
+            elements,
+        })
     })
 }
 
@@ -1871,7 +2114,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_structure_elements_mem(
         let password = password_from_ffi(password)?;
         let elements = crate::extract_structure_elements_mem_with_password(buffer, pages, password)
             .map_err(map_error)?;
-        Ok(CStructureElementsResult { elements })
+        Ok(CStructureElementsResult {
+            tag: CStructureElementsResult::TAG,
+            elements,
+        })
     })
 }
 
@@ -1895,7 +2141,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_pages_markdown(
         let password = password_from_ffi(password)?;
         let inner = crate::extract_pages_markdown_with_password(path, pages.as_deref(), password)
             .map_err(map_error)?;
-        Ok(CPagesExtractionResult { inner })
+        Ok(CPagesExtractionResult {
+            tag: CPagesExtractionResult::TAG,
+            inner,
+        })
     })
 }
 
@@ -1922,7 +2171,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_pages_markdown_mem(
         let inner =
             crate::extract_pages_markdown_mem_with_password(buffer, pages.as_deref(), password)
                 .map_err(map_error)?;
-        Ok(CPagesExtractionResult { inner })
+        Ok(CPagesExtractionResult {
+            tag: CPagesExtractionResult::TAG,
+            inner,
+        })
     })
 }
 
@@ -1947,7 +2199,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_text_in_regions(
         let pages =
             crate::extract_text_in_regions_mem_with_password(&buffer, &page_regions, password)
                 .map_err(map_error)?;
-        Ok(CRegionTextResult { pages })
+        Ok(CRegionTextResult {
+            tag: CRegionTextResult::TAG,
+            pages,
+        })
     })
 }
 
@@ -1972,7 +2227,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_text_in_regions_mem(
         let pages =
             crate::extract_text_in_regions_mem_with_password(buffer, &page_regions, password)
                 .map_err(map_error)?;
-        Ok(CRegionTextResult { pages })
+        Ok(CRegionTextResult {
+            tag: CRegionTextResult::TAG,
+            pages,
+        })
     })
 }
 
@@ -1997,7 +2255,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_tables_in_regions(
         let pages =
             crate::extract_tables_in_regions_mem_with_password(&buffer, &page_regions, password)
                 .map_err(map_error)?;
-        Ok(CRegionTextResult { pages })
+        Ok(CRegionTextResult {
+            tag: CRegionTextResult::TAG,
+            pages,
+        })
     })
 }
 
@@ -2023,7 +2284,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_tables_in_regions_mem(
         let pages =
             crate::extract_tables_in_regions_mem_with_password(buffer, &page_regions, password)
                 .map_err(map_error)?;
-        Ok(CRegionTextResult { pages })
+        Ok(CRegionTextResult {
+            tag: CRegionTextResult::TAG,
+            pages,
+        })
     })
 }
 
@@ -2053,7 +2317,10 @@ pub unsafe extern "C" fn pdf_inspector_detect_vector_grid_in_region(
             &buffer, page, region, render_dpi, password,
         )
         .map_err(map_error)?;
-        Ok(CVectorGridResult { detection })
+        Ok(CVectorGridResult {
+            tag: CVectorGridResult::TAG,
+            detection,
+        })
     })
 }
 
@@ -2083,7 +2350,10 @@ pub unsafe extern "C" fn pdf_inspector_detect_vector_grid_in_region_mem(
             buffer, page, region, render_dpi, password,
         )
         .map_err(map_error)?;
-        Ok(CVectorGridResult { detection })
+        Ok(CVectorGridResult {
+            tag: CVectorGridResult::TAG,
+            detection,
+        })
     })
 }
 
@@ -2111,7 +2381,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_tables_with_structure_auto(
         let results =
             crate::extract_tables_with_structure_auto_mem_with_password(&buffer, &inputs, password)
                 .map_err(map_error)?;
-        Ok(CTsrTableExtractionResult { results })
+        Ok(CTsrTableExtractionResult {
+            tag: CTsrTableExtractionResult::TAG,
+            results,
+        })
     })
 }
 
@@ -2140,7 +2413,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_tables_with_structure_auto_mem(
         let results =
             crate::extract_tables_with_structure_auto_mem_with_password(buffer, &inputs, password)
                 .map_err(map_error)?;
-        Ok(CTsrTableExtractionResult { results })
+        Ok(CTsrTableExtractionResult {
+            tag: CTsrTableExtractionResult::TAG,
+            results,
+        })
     })
 }
 
@@ -2203,6 +2479,7 @@ fn tsr_markdown(
         crate::extract_tables_with_structure_cells_mem_with_password(buffer, inputs, password)
             .map_err(map_error)?;
     Ok(CTsrTableExtractionResult {
+        tag: CTsrTableExtractionResult::TAG,
         results: cells_lists
             .into_iter()
             .map(|cells| crate::TableExtractionResult {
@@ -2240,7 +2517,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_tables_with_structure_cells(
             &buffer, &inputs, password,
         )
         .map_err(map_error)?;
-        Ok(CTsrStructuredCellsResult { tables })
+        Ok(CTsrStructuredCellsResult {
+            tag: CTsrStructuredCellsResult::TAG,
+            tables,
+        })
     })
 }
 
@@ -2267,7 +2547,10 @@ pub unsafe extern "C" fn pdf_inspector_extract_tables_with_structure_cells_mem(
         let tables =
             crate::extract_tables_with_structure_cells_mem_with_password(buffer, &inputs, password)
                 .map_err(map_error)?;
-        Ok(CTsrStructuredCellsResult { tables })
+        Ok(CTsrStructuredCellsResult {
+            tag: CTsrStructuredCellsResult::TAG,
+            tables,
+        })
     })
 }
 
@@ -2278,7 +2561,7 @@ pub unsafe extern "C" fn pdf_inspector_extract_tables_with_structure_cells_mem(
 /// Free a `CTextResult` instance.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_text_result_free(result: *mut CTextResult) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get the extracted UTF-8 text bytes. Extracted text may legitimately contain
@@ -2289,7 +2572,7 @@ pub unsafe extern "C" fn pdf_inspector_text_result_get_text(
     result: *const CTextResult,
     out: *mut CByteView,
 ) -> bool {
-    byte_view_out(result.as_ref().map(|result| result.text.as_str()), out)
+    byte_view_out(handle_ref(result).map(|result| result.text.as_str()), out)
 }
 
 // =========================================================================
@@ -2298,13 +2581,13 @@ pub unsafe extern "C" fn pdf_inspector_text_result_get_text(
 
 /// Free a `CPdfProcessResult` instance.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_free(result: *mut CPdfProcessResult) {
-    free_boxed(result);
+pub unsafe extern "C" fn pdf_inspector_process_result_free(result: *mut CPdfProcessResult) {
+    free_handle(result);
 }
 
 /// Get the detected PDF type.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_type(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_type(
     result: *const CPdfProcessResult,
 ) -> CPdfType {
     with_result(result, CPdfType::Unknown, |res| c_pdf_type(res.pdf_type))
@@ -2312,7 +2595,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_type(
 
 /// Get the total page count.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_page_count(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_page_count(
     result: *const CPdfProcessResult,
 ) -> u32 {
     with_result(result, 0, |res| res.page_count)
@@ -2320,7 +2603,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_page_count(
 
 /// Get the processing time in milliseconds.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_processing_time_ms(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_processing_time_ms(
     result: *const CPdfProcessResult,
 ) -> u64 {
     with_result(result, 0, |res| res.processing_time_ms)
@@ -2328,7 +2611,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_processing_time_ms(
 
 /// Get the confidence score (0.0 - 1.0).
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_confidence(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_confidence(
     result: *const CPdfProcessResult,
 ) -> f32 {
     with_result(result, 0.0, |res| res.confidence)
@@ -2336,7 +2619,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_confidence(
 
 /// Returns true if encoding issues were detected.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_has_encoding_issues(
+pub unsafe extern "C" fn pdf_inspector_process_result_has_encoding_issues(
     result: *const CPdfProcessResult,
 ) -> bool {
     with_result(result, false, |res| res.has_encoding_issues)
@@ -2344,7 +2627,7 @@ pub unsafe extern "C" fn pdf_inspector_result_has_encoding_issues(
 
 /// Returns true if complex layout (tables or columns) was detected.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_is_complex_layout(
+pub unsafe extern "C" fn pdf_inspector_process_result_is_complex_layout(
     result: *const CPdfProcessResult,
 ) -> bool {
     with_result(result, false, |res| res.layout.is_complex)
@@ -2359,7 +2642,7 @@ pub unsafe extern "C" fn pdf_inspector_result_is_complex_layout(
 pub unsafe extern "C" fn pdf_inspector_classification_free(
     classification: *mut CPdfClassification,
 ) {
-    free_boxed(classification);
+    free_handle(classification);
 }
 
 /// Get the detected PDF type from classification.
@@ -2395,7 +2678,7 @@ pub unsafe extern "C" fn pdf_inspector_classification_get_confidence(
 /// Free a `CPdfTypeResult` instance.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_pdf_type_result_free(result: *mut CPdfTypeResult) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get the detected PDF type.
@@ -2448,9 +2731,7 @@ pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_title(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
-            .and_then(|result| result.inner.title.as_deref()),
+        handle_ref(result).and_then(|result| result.inner.title.as_deref()),
         out,
     )
 }
@@ -2470,9 +2751,7 @@ pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_pages_needing_ocr(
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        result
-            .as_ref()
-            .map(|result| &result.inner.pages_needing_ocr[..]),
+        handle_ref(result).map(|result| &result.inner.pages_needing_ocr[..]),
         out,
     )
 }
@@ -2480,7 +2759,7 @@ pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_pages_needing_ocr(
 /// Get the number of per-page OCR-reason entries on a `CPdfTypeResult`. Returns
 /// zero for a NULL handle.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_count(
+pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_page_count(
     result: *const CPdfTypeResult,
 ) -> usize {
     ocr_reason_entries(result, |result| &result.ocr_reasons_by_page[..]).map_or(0, <[_]>::len)
@@ -2489,7 +2768,7 @@ pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_count(
 /// Get the 1-indexed page number for one OCR-reason entry on a `CPdfTypeResult`.
 /// Returns zero for a NULL handle or an out-of-range index.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_page(
+pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_page_number(
     result: *const CPdfTypeResult,
     index: usize,
 ) -> u32 {
@@ -2503,7 +2782,7 @@ pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_page(
 /// Get the number of reason strings in one OCR-reason entry on a `CPdfTypeResult`.
 /// Returns zero for a NULL handle or an out-of-range index.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_reasons_count(
+pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_page_reason_count(
     result: *const CPdfTypeResult,
     index: usize,
 ) -> usize {
@@ -2518,7 +2797,7 @@ pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_reasons_c
 /// zeroes `out` when the requested reason is absent or an input pointer is
 /// NULL. The view remains valid until `result` is freed.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_reason(
+pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_page_reason(
     result: *const CPdfTypeResult,
     index: usize,
     reason_index: usize,
@@ -2542,12 +2821,12 @@ pub unsafe extern "C" fn pdf_inspector_pdf_type_result_get_ocr_reasons_reason(
 /// Free a `CPagesExtractionResult` instance.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_pages_result_free(result: *mut CPagesExtractionResult) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get number of extracted pages.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_count(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_entry_count(
     result: *const CPagesExtractionResult,
 ) -> usize {
     with_pages_result(result, 0, |res| res.pages.len())
@@ -2556,7 +2835,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_count(
 /// Get the 1-indexed page number of the page at `index`, matching the base used
 /// by every other page number in this ABI. Returns 0 for an out-of-range index.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_number(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_entry_page_number(
     result: *const CPagesExtractionResult,
     index: usize,
 ) -> u32 {
@@ -2567,7 +2846,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_number(
 
 /// Get whether page at index needs OCR.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_needs_ocr(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_entry_needs_ocr(
     result: *const CPagesExtractionResult,
     index: usize,
 ) -> bool {
@@ -2590,14 +2869,12 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_is_complex(
 /// Markdown is absent or either pointer is NULL. The view remains valid until
 /// `result` is freed.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_markdown(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_markdown(
     result: *const CPdfProcessResult,
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
-            .and_then(|result| result.inner.markdown.as_deref()),
+        handle_ref(result).and_then(|result| result.inner.markdown.as_deref()),
         out,
     )
 }
@@ -2606,54 +2883,48 @@ pub unsafe extern "C" fn pdf_inspector_result_get_markdown(
 /// is absent or either pointer is NULL. The view remains valid until `result`
 /// is freed.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_title(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_title(
     result: *const CPdfProcessResult,
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
-            .and_then(|result| result.inner.title.as_deref()),
+        handle_ref(result).and_then(|result| result.inner.title.as_deref()),
         out,
     )
 }
 
 /// Get the borrowed array of 1-indexed page numbers needing OCR.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_pages_needing_ocr(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_pages_needing_ocr(
     result: *const CPdfProcessResult,
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        result.as_ref().map(|res| &res.inner.pages_needing_ocr[..]),
+        handle_ref(result).map(|res| &res.inner.pages_needing_ocr[..]),
         out,
     )
 }
 
 /// Get the borrowed array of 1-indexed page numbers with tables.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_pages_with_tables(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_pages_with_tables(
     result: *const CPdfProcessResult,
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        result
-            .as_ref()
-            .map(|res| &res.inner.layout.pages_with_tables[..]),
+        handle_ref(result).map(|res| &res.inner.layout.pages_with_tables[..]),
         out,
     )
 }
 
 /// Get the borrowed array of 1-indexed page numbers with columns.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_pages_with_columns(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_pages_with_columns(
     result: *const CPdfProcessResult,
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        result
-            .as_ref()
-            .map(|res| &res.inner.layout.pages_with_columns[..]),
+        handle_ref(result).map(|res| &res.inner.layout.pages_with_columns[..]),
         out,
     )
 }
@@ -2661,7 +2932,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_pages_with_columns(
 /// Get the number of per-page OCR-reason entries on a `CPdfProcessResult`. Returns
 /// zero for a NULL handle.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_count(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_ocr_page_count(
     result: *const CPdfProcessResult,
 ) -> usize {
     ocr_reason_entries(result, |result| &result.inner.ocr_reasons_by_page[..]).map_or(0, <[_]>::len)
@@ -2670,7 +2941,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_count(
 /// Get the 1-indexed page number for one OCR-reason entry on a `CPdfProcessResult`.
 /// Returns zero for a NULL handle or an out-of-range index.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_page(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_ocr_page_number(
     result: *const CPdfProcessResult,
     index: usize,
 ) -> u32 {
@@ -2684,7 +2955,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_page(
 /// Get the number of reason strings in one OCR-reason entry on a `CPdfProcessResult`.
 /// Returns zero for a NULL handle or an out-of-range index.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_reasons_count(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_ocr_page_reason_count(
     result: *const CPdfProcessResult,
     index: usize,
 ) -> usize {
@@ -2699,7 +2970,7 @@ pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_reasons_count(
 /// zeroes `out` when the requested reason is absent or an input pointer is
 /// NULL. The view remains valid until `result` is freed.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_reason(
+pub unsafe extern "C" fn pdf_inspector_process_result_get_ocr_page_reason(
     result: *const CPdfProcessResult,
     index: usize,
     reason_index: usize,
@@ -2719,14 +2990,13 @@ pub unsafe extern "C" fn pdf_inspector_result_get_ocr_reasons_reason(
 /// Get the page Markdown UTF-8 bytes at `index`. Returns `false` and zeroes
 /// `out` for an invalid index or input pointer.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_markdown(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_entry_markdown(
     result: *const CPagesExtractionResult,
     index: usize,
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.inner.pages.get(index))
             .map(|page| page.markdown.as_str()),
         out,
@@ -2736,14 +3006,13 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_markdown(
 /// Get the page OCR reason UTF-8 bytes at `index`. Returns `false` and zeroes
 /// `out` when the reason is absent or an input pointer is invalid.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_page_ocr_reason(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_entry_ocr_reason(
     result: *const CPagesExtractionResult,
     index: usize,
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.inner.pages.get(index))
             .and_then(|page| page.ocr_reason.as_deref()),
         out,
@@ -2757,7 +3026,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_pages_needing_ocr(
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        result.as_ref().map(|res| &res.inner.pages_needing_ocr[..]),
+        handle_ref(result).map(|res| &res.inner.pages_needing_ocr[..]),
         out,
     )
 }
@@ -2769,7 +3038,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_pages_with_tables(
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        result.as_ref().map(|res| &res.inner.pages_with_tables[..]),
+        handle_ref(result).map(|res| &res.inner.pages_with_tables[..]),
         out,
     )
 }
@@ -2781,7 +3050,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_pages_with_columns(
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        result.as_ref().map(|res| &res.inner.pages_with_columns[..]),
+        handle_ref(result).map(|res| &res.inner.pages_with_columns[..]),
         out,
     )
 }
@@ -2789,7 +3058,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_pages_with_columns(
 /// Get the number of per-page OCR-reason entries on a `CPagesExtractionResult`. Returns
 /// zero for a NULL handle.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_reasons_count(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_page_count(
     result: *const CPagesExtractionResult,
 ) -> usize {
     ocr_reason_entries(result, |result| &result.inner.ocr_reasons_by_page[..]).map_or(0, <[_]>::len)
@@ -2798,7 +3067,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_reasons_count(
 /// Get the 1-indexed page number for one OCR-reason entry on a `CPagesExtractionResult`.
 /// Returns zero for a NULL handle or an out-of-range index.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_reasons_page(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_page_number(
     result: *const CPagesExtractionResult,
     index: usize,
 ) -> u32 {
@@ -2812,7 +3081,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_reasons_page(
 /// Get the number of reason strings in one OCR-reason entry on a `CPagesExtractionResult`.
 /// Returns zero for a NULL handle or an out-of-range index.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_reasons_reasons_count(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_page_reason_count(
     result: *const CPagesExtractionResult,
     index: usize,
 ) -> usize {
@@ -2827,7 +3096,7 @@ pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_reasons_reasons_coun
 /// zeroes `out` when the requested reason is absent or an input pointer is
 /// NULL. The view remains valid until `result` is freed.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_reasons_reason(
+pub unsafe extern "C" fn pdf_inspector_pages_result_get_ocr_page_reason(
     result: *const CPagesExtractionResult,
     index: usize,
     reason_index: usize,
@@ -2852,9 +3121,7 @@ pub unsafe extern "C" fn pdf_inspector_classification_get_pages_needing_ocr(
     out: *mut CU32View,
 ) -> bool {
     u32_view_out(
-        classification
-            .as_ref()
-            .map(|cl| &cl.inner.pages_needing_ocr[..]),
+        handle_ref(classification).map(|cl| &cl.inner.pages_needing_ocr[..]),
         out,
     )
 }
@@ -2874,7 +3141,12 @@ pub unsafe extern "C" fn pdf_inspector_classification_get_pages_needing_ocr(
 pub unsafe extern "C" fn pdf_inspector_text_items_result_new(
     result_out: *mut *mut CTextItemsResult,
 ) -> PdfInspectorError {
-    emit_handle(result_out, || Ok(CTextItemsResult { items: Vec::new() }))
+    emit_handle(result_out, || {
+        Ok(CTextItemsResult {
+            tag: CTextItemsResult::TAG,
+            items: Vec::new(),
+        })
+    })
 }
 
 /// Append `descriptors_count` caller-supplied items to a `CTextItemsResult`,
@@ -2890,8 +3162,11 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_add(
     descriptors_count: usize,
 ) -> PdfInspectorError {
     catch_panic_err(|| {
-        let Some(items) = items.as_mut() else {
+        if items.is_null() {
             return Err(PdfInspectorError::NullPointer);
+        }
+        let Some(items) = handle_mut(items) else {
+            return Err(PdfInspectorError::InvalidArgument);
         };
         let converted = text_items_from_ffi(descriptors, descriptors_count)?;
         items.items.extend(converted);
@@ -2902,7 +3177,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_add(
 /// Free a `CTextItemsResult` instance.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_text_items_result_free(result: *mut CTextItemsResult) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get the number of positioned text items.
@@ -2910,7 +3185,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_free(result: *mut CText
 pub unsafe extern "C" fn pdf_inspector_text_items_result_get_count(
     result: *const CTextItemsResult,
 ) -> usize {
-    result.as_ref().map_or(0, |result| result.items.len())
+    handle_ref(result).map_or(0, |result| result.items.len())
 }
 
 /// Copy an item's numeric and flag fields into `out`. Returns `false` and
@@ -2927,7 +3202,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_get_metrics(
         return false;
     };
     *out = CTextItemMetrics::default();
-    let Some(item) = result.as_ref().and_then(|result| result.items.get(index)) else {
+    let Some(item) = handle_ref(result).and_then(|result| result.items.get(index)) else {
         return false;
     };
     let mut flags = 0;
@@ -2966,8 +3241,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_get_text(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.items.get(index))
             .map(|item| item.text.as_str()),
         out,
@@ -2984,8 +3258,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_get_font(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.items.get(index))
             .map(|item| item.font.as_str()),
         out,
@@ -3005,8 +3278,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_get_font_tag(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.items.get(index))
             .map(|item| item.font_tag.as_str()),
         out,
@@ -3023,8 +3295,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_get_link_url(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.items.get(index))
             .and_then(|item| text_item_link_url(&item.item_type))
             .map(String::as_str),
@@ -3041,7 +3312,7 @@ pub unsafe extern "C" fn pdf_inspector_text_items_result_get_link_url(
 pub unsafe extern "C" fn pdf_inspector_structure_elements_result_free(
     result: *mut CStructureElementsResult,
 ) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get the number of tagged-PDF structure elements.
@@ -3049,7 +3320,7 @@ pub unsafe extern "C" fn pdf_inspector_structure_elements_result_free(
 pub unsafe extern "C" fn pdf_inspector_structure_elements_result_get_count(
     result: *const CStructureElementsResult,
 ) -> usize {
-    result.as_ref().map_or(0, |result| result.elements.len())
+    handle_ref(result).map_or(0, |result| result.elements.len())
 }
 
 /// Get a structure element's 1-indexed page number.
@@ -3077,10 +3348,7 @@ pub unsafe extern "C" fn pdf_inspector_structure_elements_result_get_mcid(
         return false;
     };
     *out = 0;
-    let Some(element) = result
-        .as_ref()
-        .and_then(|result| result.elements.get(index))
-    else {
+    let Some(element) = handle_ref(result).and_then(|result| result.elements.get(index)) else {
         return false;
     };
     *out = element.mcid;
@@ -3097,8 +3365,7 @@ pub unsafe extern "C" fn pdf_inspector_structure_elements_result_get_role(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.elements.get(index))
             .map(|element| element.role.as_str()),
         out,
@@ -3112,20 +3379,20 @@ pub unsafe extern "C" fn pdf_inspector_structure_elements_result_get_role(
 /// Free a `CRegionTextResult` instance.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_region_text_result_free(result: *mut CRegionTextResult) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get the number of page entries in a region-text result.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_region_text_result_get_page_count(
+pub unsafe extern "C" fn pdf_inspector_region_text_result_get_entry_count(
     result: *const CRegionTextResult,
 ) -> usize {
-    result.as_ref().map_or(0, |result| result.pages.len())
+    handle_ref(result).map_or(0, |result| result.pages.len())
 }
 
 /// Get a page entry's 1-indexed page number.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_region_text_result_get_page(
+pub unsafe extern "C" fn pdf_inspector_region_text_result_get_entry_page_number(
     result: *const CRegionTextResult,
     page_index: usize,
 ) -> u32 {
@@ -3152,8 +3419,7 @@ pub unsafe extern "C" fn pdf_inspector_region_text_result_get_text(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.pages.get(page_index))
             .and_then(|page| page.regions.get(region_index))
             .map(|region| region.text.as_str()),
@@ -3185,8 +3451,7 @@ pub unsafe extern "C" fn pdf_inspector_region_text_result_get_ocr_reason(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.pages.get(page_index))
             .and_then(|page| page.regions.get(region_index))
             .and_then(|region| region.ocr_reason.as_deref()),
@@ -3201,7 +3466,7 @@ pub unsafe extern "C" fn pdf_inspector_region_text_result_get_ocr_reason(
 /// Free a `CVectorGridResult` instance. NULL is accepted.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_vector_grid_result_free(result: *mut CVectorGridResult) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Return whether a grid was detected. A valid no-grid result returns false,
@@ -3210,9 +3475,7 @@ pub unsafe extern "C" fn pdf_inspector_vector_grid_result_free(result: *mut CVec
 pub unsafe extern "C" fn pdf_inspector_vector_grid_result_is_detected(
     result: *const CVectorGridResult,
 ) -> bool {
-    result
-        .as_ref()
-        .is_some_and(|result| result.detection.is_some())
+    handle_ref(result).is_some_and(|result| result.detection.is_some())
 }
 
 /// Get the number of HTML-like structure tokens in a detected grid. Returns
@@ -3221,8 +3484,7 @@ pub unsafe extern "C" fn pdf_inspector_vector_grid_result_is_detected(
 pub unsafe extern "C" fn pdf_inspector_vector_grid_result_get_structure_token_count(
     result: *const CVectorGridResult,
 ) -> usize {
-    result
-        .as_ref()
+    handle_ref(result)
         .and_then(|result| result.detection.as_ref())
         .map_or(0, |detection| detection.structure_tokens.len())
 }
@@ -3237,8 +3499,7 @@ pub unsafe extern "C" fn pdf_inspector_vector_grid_result_get_structure_token(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.detection.as_ref())
             .and_then(|detection| detection.structure_tokens.get(index))
             .map(String::as_str),
@@ -3252,8 +3513,7 @@ pub unsafe extern "C" fn pdf_inspector_vector_grid_result_get_structure_token(
 pub unsafe extern "C" fn pdf_inspector_vector_grid_result_get_cell_count(
     result: *const CVectorGridResult,
 ) -> usize {
-    result
-        .as_ref()
+    handle_ref(result)
         .and_then(|result| result.detection.as_ref())
         .map_or(0, |detection| detection.cell_bboxes.len())
 }
@@ -3271,8 +3531,7 @@ pub unsafe extern "C" fn pdf_inspector_vector_grid_result_get_cell_box(
         return false;
     };
     *out = CVectorGridCellBox::default();
-    let Some(bbox) = result
-        .as_ref()
+    let Some(bbox) = handle_ref(result)
         .and_then(|result| result.detection.as_ref())
         .and_then(|detection| detection.cell_bboxes.get(index))
     else {
@@ -3297,15 +3556,15 @@ pub unsafe extern "C" fn pdf_inspector_vector_grid_result_get_cell_box(
 /// Free a `CTsrTableExtractionResult` instance. NULL is accepted.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_tsr_result_free(result: *mut CTsrTableExtractionResult) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get the number of table extraction results. Returns zero for a NULL handle.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_tsr_result_get_count(
+pub unsafe extern "C" fn pdf_inspector_tsr_result_get_table_count(
     result: *const CTsrTableExtractionResult,
 ) -> usize {
-    result.as_ref().map_or(0, |result| result.results.len())
+    handle_ref(result).map_or(0, |result| result.results.len())
 }
 
 /// Get one borrowed Markdown string. Returns false and zeroes `out` for an
@@ -3317,8 +3576,7 @@ pub unsafe extern "C" fn pdf_inspector_tsr_result_get_markdown(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.results.get(index))
             .map(|result| result.markdown.as_str()),
         out,
@@ -3334,8 +3592,7 @@ pub unsafe extern "C" fn pdf_inspector_tsr_result_get_fallback_reason(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.results.get(index))
             .and_then(|result| result.fallback_reason.as_deref()),
         out,
@@ -3351,7 +3608,7 @@ pub unsafe extern "C" fn pdf_inspector_tsr_result_get_fallback_reason(
 pub unsafe extern "C" fn pdf_inspector_tsr_cells_result_free(
     result: *mut CTsrStructuredCellsResult,
 ) {
-    free_boxed(result);
+    free_handle(result);
 }
 
 /// Get the number of input-parallel cell lists. Returns zero for a NULL handle.
@@ -3359,7 +3616,7 @@ pub unsafe extern "C" fn pdf_inspector_tsr_cells_result_free(
 pub unsafe extern "C" fn pdf_inspector_tsr_cells_result_get_table_count(
     result: *const CTsrStructuredCellsResult,
 ) -> usize {
-    result.as_ref().map_or(0, |result| result.tables.len())
+    handle_ref(result).map_or(0, |result| result.tables.len())
 }
 
 /// Get the number of cells for one input. Returns zero for an invalid index or
@@ -3369,8 +3626,7 @@ pub unsafe extern "C" fn pdf_inspector_tsr_cells_result_get_cell_count(
     result: *const CTsrStructuredCellsResult,
     table_index: usize,
 ) -> usize {
-    result
-        .as_ref()
+    handle_ref(result)
         .and_then(|result| result.tables.get(table_index))
         .map_or(0, Vec::len)
 }
@@ -3388,8 +3644,7 @@ pub unsafe extern "C" fn pdf_inspector_tsr_cells_result_get_cell(
         return false;
     };
     *out = CTsrStructuredCell::default();
-    let Some(cell) = result
-        .as_ref()
+    let Some(cell) = handle_ref(result)
         .and_then(|result| result.tables.get(table_index))
         .and_then(|table| table.get(cell_index))
     else {
@@ -3418,8 +3673,7 @@ pub unsafe extern "C" fn pdf_inspector_tsr_cells_result_get_cell_text(
     out: *mut CByteView,
 ) -> bool {
     byte_view_out(
-        result
-            .as_ref()
+        handle_ref(result)
             .and_then(|result| result.tables.get(table_index))
             .and_then(|table| table.get(cell_index))
             .map(|cell| cell.text.as_str()),
@@ -3467,7 +3721,7 @@ mod tests {
     }
 
     /// Construct an options handle, asserting the entry point succeeded.
-    fn new_options() -> *mut crate::PdfOptions {
+    fn new_options() -> *mut CPdfOptions {
         let mut options = std::ptr::null_mut();
         unsafe {
             assert_eq!(
@@ -3479,7 +3733,7 @@ mod tests {
         options
     }
 
-    type BoolSetter = unsafe extern "C" fn(*mut crate::PdfOptions, bool) -> PdfInspectorError;
+    type BoolSetter = unsafe extern "C" fn(*mut CPdfOptions, bool) -> PdfInspectorError;
 
     /// Every `bool` option setter, so a new one is visibly missing from the list.
     const BOOL_SETTERS: &[(&str, BoolSetter)] = &[
@@ -3533,19 +3787,20 @@ mod tests {
             assert!(!result_ptr.is_null());
 
             // Query results
-            let pdf_type = pdf_inspector_result_get_type(result_ptr);
+            let pdf_type = pdf_inspector_process_result_get_type(result_ptr);
             assert_eq!(pdf_type, CPdfType::TextBased);
 
-            let page_count = pdf_inspector_result_get_page_count(result_ptr);
+            let page_count = pdf_inspector_process_result_get_page_count(result_ptr);
             assert!(page_count > 0);
 
             let markdown =
-                get_byte_view(|out| pdf_inspector_result_get_markdown(result_ptr, out)).unwrap();
+                get_byte_view(|out| pdf_inspector_process_result_get_markdown(result_ptr, out))
+                    .unwrap();
             assert!(!markdown.ptr.is_null());
             assert!(markdown.len > 0);
 
             // Free result
-            pdf_inspector_result_free(result_ptr);
+            pdf_inspector_process_result_free(result_ptr);
             pdf_inspector_options_free(options);
         }
     }
@@ -3693,6 +3948,7 @@ mod tests {
                 mcid: None,
             };
             let items = Box::into_raw(Box::new(CTextItemsResult {
+                tag: CTextItemsResult::TAG,
                 items: vec![
                     make_item("Title", 750.0, 24.0),
                     make_item("Body text one", 700.0, 12.0),
@@ -3746,7 +4002,10 @@ mod tests {
             pdf_inspector_text_result_free(result);
             pdf_inspector_options_free(options);
 
-            let empty_items = Box::into_raw(Box::new(CTextItemsResult { items: Vec::new() }));
+            let empty_items = Box::into_raw(Box::new(CTextItemsResult {
+                tag: CTextItemsResult::TAG,
+                items: Vec::new(),
+            }));
             result = std::ptr::null_mut();
             assert_eq!(
                 pdf_inspector_to_markdown_from_items(
@@ -4141,25 +4400,22 @@ mod tests {
             .unwrap();
             assert_eq!(std::slice::from_raw_parts(pages.ptr, pages.len), &[1, 2]);
 
+            assert_eq!(pdf_inspector_pdf_type_result_get_ocr_page_count(result), 2);
             assert_eq!(
-                pdf_inspector_pdf_type_result_get_ocr_reasons_count(result),
-                2
-            );
-            assert_eq!(
-                pdf_inspector_pdf_type_result_get_ocr_reasons_page(result, 0),
+                pdf_inspector_pdf_type_result_get_ocr_page_number(result, 0),
                 1
             );
             assert_eq!(
-                pdf_inspector_pdf_type_result_get_ocr_reasons_reasons_count(result, 0),
+                pdf_inspector_pdf_type_result_get_ocr_page_reason_count(result, 0),
                 2
             );
             let reason = get_byte_view(|out| {
-                pdf_inspector_pdf_type_result_get_ocr_reasons_reason(result, 0, 0, out)
+                pdf_inspector_pdf_type_result_get_ocr_page_reason(result, 0, 0, out)
             })
             .unwrap();
             assert_eq!(std::slice::from_raw_parts(reason.ptr, reason.len), b"a\0b");
             assert_eq!(
-                pdf_inspector_pdf_type_result_get_ocr_reasons_page(result, 2),
+                pdf_inspector_pdf_type_result_get_ocr_page_number(result, 2),
                 0
             );
 
@@ -4167,7 +4423,7 @@ mod tests {
                 ptr: std::ptr::NonNull::dangling().as_ptr(),
                 len: 1,
             };
-            assert!(!pdf_inspector_pdf_type_result_get_ocr_reasons_reason(
+            assert!(!pdf_inspector_pdf_type_result_get_ocr_page_reason(
                 result, 0, 2, &mut view,
             ));
             assert!(view.ptr.is_null());
@@ -4218,21 +4474,23 @@ mod tests {
 
             // Test zero-copy string getters
             let markdown =
-                get_byte_view(|out| pdf_inspector_result_get_markdown(result_ptr, out)).unwrap();
+                get_byte_view(|out| pdf_inspector_process_result_get_markdown(result_ptr, out))
+                    .unwrap();
             assert!(!markdown.ptr.is_null());
             assert!(markdown.len > 0);
 
             // Test zero-copy arrays
-            let ocr_pages =
-                get_u32_view(|out| pdf_inspector_result_get_pages_needing_ocr(result_ptr, out))
-                    .unwrap();
+            let ocr_pages = get_u32_view(|out| {
+                pdf_inspector_process_result_get_pages_needing_ocr(result_ptr, out)
+            })
+            .unwrap();
             assert_eq!(ocr_pages.len, 0);
 
             // Test detailed OCR reasons getters
-            let reasons_count = pdf_inspector_result_get_ocr_reasons_count(result_ptr);
+            let reasons_count = pdf_inspector_process_result_get_ocr_page_count(result_ptr);
             assert_eq!(reasons_count, 0); // No ocr reasons for this text-based PDF
 
-            pdf_inspector_result_free(result_ptr);
+            pdf_inspector_process_result_free(result_ptr);
             pdf_inspector_options_free(options);
         }
     }
@@ -4241,15 +4499,18 @@ mod tests {
     fn null_handles_yield_zero_values() {
         unsafe {
             assert_eq!(
-                pdf_inspector_result_get_type(std::ptr::null()),
+                pdf_inspector_process_result_get_type(std::ptr::null()),
                 CPdfType::Unknown
             );
-            assert_eq!(pdf_inspector_result_get_page_count(std::ptr::null()), 0);
+            assert_eq!(
+                pdf_inspector_process_result_get_page_count(std::ptr::null()),
+                0
+            );
             let mut byte_view = CByteView {
                 ptr: std::ptr::NonNull::dangling().as_ptr(),
                 len: 7,
             };
-            assert!(!pdf_inspector_result_get_markdown(
+            assert!(!pdf_inspector_process_result_get_markdown(
                 std::ptr::null(),
                 &mut byte_view
             ));
@@ -4260,10 +4521,10 @@ mod tests {
                 CPdfType::Unknown
             );
             assert_eq!(
-                pdf_inspector_pages_result_get_page_count(std::ptr::null()),
+                pdf_inspector_pages_result_get_entry_count(std::ptr::null()),
                 0
             );
-            assert!(!pdf_inspector_pages_result_get_page_markdown(
+            assert!(!pdf_inspector_pages_result_get_entry_markdown(
                 std::ptr::null(),
                 0,
                 &mut byte_view,
@@ -4285,14 +4546,14 @@ mod tests {
                 ptr: std::ptr::NonNull::dangling().as_ptr(),
                 len: 7,
             };
-            assert!(!pdf_inspector_result_get_pages_needing_ocr(
+            assert!(!pdf_inspector_process_result_get_pages_needing_ocr(
                 std::ptr::null(),
                 &mut pages_view,
             ));
             assert!(pages_view.ptr.is_null());
             assert_eq!(pages_view.len, 0);
             // A NULL output is tolerated.
-            assert!(!pdf_inspector_result_get_pages_needing_ocr(
+            assert!(!pdf_inspector_process_result_get_pages_needing_ocr(
                 std::ptr::null(),
                 std::ptr::null_mut(),
             ));
@@ -4303,6 +4564,7 @@ mod tests {
     fn borrowed_strings_are_lossless_and_distinguish_absence() {
         unsafe {
             let result = CPdfProcessResult {
+                tag: CPdfProcessResult::TAG,
                 inner: crate::PdfProcessResult {
                     pdf_type: crate::PdfType::TextBased,
                     markdown: Some("a\0b".into()),
@@ -4322,31 +4584,37 @@ mod tests {
             let result = Box::into_raw(Box::new(result));
 
             let markdown =
-                get_byte_view(|out| pdf_inspector_result_get_markdown(result, out)).unwrap();
+                get_byte_view(|out| pdf_inspector_process_result_get_markdown(result, out))
+                    .unwrap();
             assert_eq!(
                 std::slice::from_raw_parts(markdown.ptr, markdown.len),
                 b"a\0b"
             );
-            let title = get_byte_view(|out| pdf_inspector_result_get_title(result, out)).unwrap();
+            let title =
+                get_byte_view(|out| pdf_inspector_process_result_get_title(result, out)).unwrap();
             assert!(!title.ptr.is_null());
             assert_eq!(title.len, 0);
-            let reason =
-                get_byte_view(|out| pdf_inspector_result_get_ocr_reasons_reason(result, 0, 0, out))
-                    .unwrap();
+            let reason = get_byte_view(|out| {
+                pdf_inspector_process_result_get_ocr_page_reason(result, 0, 0, out)
+            })
+            .unwrap();
             assert_eq!(std::slice::from_raw_parts(reason.ptr, reason.len), b"\0");
-            let empty_reason =
-                get_byte_view(|out| pdf_inspector_result_get_ocr_reasons_reason(result, 0, 1, out))
-                    .unwrap();
+            let empty_reason = get_byte_view(|out| {
+                pdf_inspector_process_result_get_ocr_page_reason(result, 0, 1, out)
+            })
+            .unwrap();
             assert!(!empty_reason.ptr.is_null());
             assert_eq!(empty_reason.len, 0);
             assert!(get_byte_view(|out| {
-                pdf_inspector_result_get_ocr_reasons_reason(result, 1, 0, out)
+                pdf_inspector_process_result_get_ocr_page_reason(result, 1, 0, out)
             })
             .is_none());
             (*result).inner.title = None;
-            assert!(get_byte_view(|out| pdf_inspector_result_get_title(result, out)).is_none());
+            assert!(
+                get_byte_view(|out| pdf_inspector_process_result_get_title(result, out)).is_none()
+            );
 
-            pdf_inspector_result_free(result);
+            pdf_inspector_process_result_free(result);
         }
     }
 
@@ -4354,6 +4622,7 @@ mod tests {
     fn positioned_text_and_structure_getters_preserve_join_fields() {
         unsafe {
             let text_items = Box::into_raw(Box::new(CTextItemsResult {
+                tag: CTextItemsResult::TAG,
                 items: vec![crate::TextItem {
                     text: "heading".into(),
                     x: 1.0,
@@ -4373,6 +4642,7 @@ mod tests {
                 }],
             }));
             let elements = Box::into_raw(Box::new(CStructureElementsResult {
+                tag: CStructureElementsResult::TAG,
                 elements: vec![crate::StructureElement {
                     page: 1,
                     mcid: 7,
@@ -4425,6 +4695,7 @@ mod tests {
     fn region_text_getters_preserve_shape_text_and_ocr_metadata() {
         unsafe {
             let result = Box::into_raw(Box::new(CRegionTextResult {
+                tag: CRegionTextResult::TAG,
                 pages: vec![crate::PageRegionResult {
                     page: 2,
                     regions: vec![
@@ -4442,8 +4713,11 @@ mod tests {
                 }],
             }));
 
-            assert_eq!(pdf_inspector_region_text_result_get_page_count(result), 1);
-            assert_eq!(pdf_inspector_region_text_result_get_page(result, 0), 3);
+            assert_eq!(pdf_inspector_region_text_result_get_entry_count(result), 1);
+            assert_eq!(
+                pdf_inspector_region_text_result_get_entry_page_number(result, 0),
+                3
+            );
             assert_eq!(
                 pdf_inspector_region_text_result_get_region_count(result, 0),
                 2
@@ -4469,13 +4743,16 @@ mod tests {
             .unwrap();
             assert_eq!(reason.len, 5);
 
-            assert_eq!(pdf_inspector_region_text_result_get_page(result, 1), 0);
+            assert_eq!(
+                pdf_inspector_region_text_result_get_entry_page_number(result, 1),
+                0
+            );
             assert!(get_byte_view(|out| {
                 pdf_inspector_region_text_result_get_text(result, 0, 2, out)
             })
             .is_none());
             assert_eq!(
-                pdf_inspector_region_text_result_get_page_count(std::ptr::null()),
+                pdf_inspector_region_text_result_get_entry_count(std::ptr::null()),
                 0
             );
             pdf_inspector_region_text_result_free(result);
@@ -4511,7 +4788,10 @@ mod tests {
                 ),
                 PdfInspectorError::Success
             );
-            assert_eq!(pdf_inspector_region_text_result_get_page(path_result, 0), 1);
+            assert_eq!(
+                pdf_inspector_region_text_result_get_entry_page_number(path_result, 0),
+                1
+            );
             assert_eq!(
                 pdf_inspector_region_text_result_get_region_count(path_result, 0),
                 1
@@ -4738,6 +5018,256 @@ mod tests {
     }
 
     #[test]
+    fn handle_tags_are_distinct_and_sit_at_offset_zero() {
+        // `free_handle` and `handle_ref` read the tag as a bare `u32` from the
+        // front of the allocation, which is only valid while every handle is
+        // `#[repr(C)]` with `tag` first. Neither the `Handle` trait nor the
+        // `impl_handles!` macro can see layout, so assert it here.
+        macro_rules! assert_tag_layout {
+            ($($ty:ty),+ $(,)?) => {{
+                let mut tags = std::collections::HashSet::new();
+                $(
+                    assert_eq!(
+                        std::mem::offset_of!($ty, tag),
+                        0,
+                        concat!(stringify!($ty), ": tag must be the first field"),
+                    );
+                    assert!(
+                        std::mem::align_of::<$ty>() >= std::mem::align_of::<u32>(),
+                        concat!(stringify!($ty), ": tag read must stay aligned"),
+                    );
+                    assert!(
+                        std::mem::size_of::<$ty>() >= std::mem::size_of::<u32>(),
+                        concat!(stringify!($ty), ": tag read must stay in bounds"),
+                    );
+                    // A duplicate tag silently re-opens the wrong-`*_free`
+                    // heap corruption the tag exists to prevent.
+                    assert!(
+                        tags.insert(<$ty as Handle>::TAG),
+                        concat!(stringify!($ty), ": duplicate handle tag"),
+                    );
+                )+
+                assert_eq!(tags.len(), 12, "every handle type must be listed here");
+            }};
+        }
+
+        assert_tag_layout!(
+            CPdfOptions,
+            CPdfProcessResult,
+            CPdfClassification,
+            CPdfTypeResult,
+            CPagesExtractionResult,
+            CTextResult,
+            CTextItemsResult,
+            CStructureElementsResult,
+            CRegionTextResult,
+            CVectorGridResult,
+            CTsrTableExtractionResult,
+            CTsrStructuredCellsResult,
+        );
+    }
+
+    #[test]
+    fn mistagged_handles_are_rejected_by_getters_and_processing_entry_points() {
+        unsafe {
+            let mut text = std::ptr::null_mut();
+            let path = CString::new(FIXTURE).unwrap();
+            assert_eq!(
+                pdf_inspector_extract_text(path.as_ptr(), std::ptr::null(), &mut text),
+                PdfInspectorError::Success
+            );
+
+            // A getter belonging to another handle type must refuse rather than
+            // reinterpret this allocation — `CPdfProcessResult` is far larger
+            // than `CTextResult`, so reading it would run off the end.
+            let wrong = text.cast::<CPdfProcessResult>();
+            assert!(
+                get_byte_view(|out| pdf_inspector_process_result_get_markdown(wrong, out))
+                    .is_none()
+            );
+            assert_eq!(pdf_inspector_process_result_get_page_count(wrong), 0);
+            assert_eq!(
+                pdf_inspector_process_result_get_type(wrong),
+                CPdfType::Unknown
+            );
+            assert_eq!(pdf_inspector_process_result_get_ocr_page_count(wrong), 0);
+
+            // Same for a mistagged handle arriving as an `options` argument.
+            let mut out = std::ptr::null_mut();
+            assert_eq!(
+                pdf_inspector_process_pdf(path.as_ptr(), text.cast::<CPdfOptions>(), &mut out,),
+                PdfInspectorError::Success,
+                "a mistagged options handle falls back to defaults"
+            );
+            pdf_inspector_process_result_free(out);
+
+            // And as the borrowed item list for Markdown conversion.
+            let mut converted = std::ptr::null_mut();
+            assert_eq!(
+                pdf_inspector_to_markdown_from_items(
+                    text.cast::<CTextItemsResult>(),
+                    std::ptr::null(),
+                    0,
+                    0,
+                    std::ptr::null(),
+                    &mut converted,
+                ),
+                PdfInspectorError::InvalidArgument
+            );
+            assert!(converted.is_null());
+
+            pdf_inspector_text_result_free(text);
+        }
+    }
+
+    #[test]
+    fn last_error_copy_reports_the_code_even_when_there_is_no_message() {
+        unsafe {
+            // `NullPointer` carries no diagnostic text. `code_out` must still
+            // report it, or the documented "compare against your call's code"
+            // check would read `Success` after a real failure.
+            let mut result = std::ptr::null_mut();
+            assert_eq!(
+                pdf_inspector_extract_text(std::ptr::null(), std::ptr::null(), &mut result),
+                PdfInspectorError::NullPointer
+            );
+            let mut code = -1;
+            assert_eq!(
+                pdf_inspector_last_error_copy(std::ptr::null_mut(), 0, &mut code),
+                0,
+                "no message"
+            );
+            assert_eq!(code, PdfInspectorError::NullPointer as i32);
+            // The borrowed-view getter still reports absence for a code-only entry.
+            assert!(get_byte_view(|out| pdf_inspector_last_error_message(out)).is_none());
+
+            // A validation failure raised before any `map_error` behaves the same.
+            let options = new_options();
+            assert_eq!(
+                pdf_inspector_options_add_page(options, 0),
+                PdfInspectorError::InvalidArgument
+            );
+            let mut code = -1;
+            assert_eq!(
+                pdf_inspector_last_error_copy(std::ptr::null_mut(), 0, &mut code),
+                0
+            );
+            assert_eq!(code, PdfInspectorError::InvalidArgument as i32);
+            pdf_inspector_options_free(options);
+        }
+    }
+
+    #[test]
+    fn last_error_copy_reports_length_code_and_truncation() {
+        unsafe {
+            // No diagnostic yet on this thread once a call has succeeded.
+            let path = CString::new(FIXTURE).unwrap();
+            let mut ok_result = std::ptr::null_mut();
+            assert_eq!(
+                pdf_inspector_process_pdf(path.as_ptr(), std::ptr::null(), &mut ok_result),
+                PdfInspectorError::Success
+            );
+            pdf_inspector_process_result_free(ok_result);
+            let mut code = -1;
+            assert_eq!(
+                pdf_inspector_last_error_copy(std::ptr::null_mut(), 0, &mut code),
+                0
+            );
+            assert_eq!(code, PdfInspectorError::Success as i32);
+
+            // A failing call leaves a diagnostic and its originating code.
+            let garbage = b"not a pdf at all";
+            let mut bad = std::ptr::null_mut();
+            assert_eq!(
+                pdf_inspector_process_pdf_mem(
+                    garbage.as_ptr(),
+                    garbage.len(),
+                    std::ptr::null(),
+                    &mut bad,
+                ),
+                PdfInspectorError::NotAPdf
+            );
+
+            // A NULL buffer with zero capacity asks for the length alone.
+            let mut code = -1;
+            let len = pdf_inspector_last_error_copy(std::ptr::null_mut(), 0, &mut code);
+            assert!(len > 0);
+            assert_eq!(code, PdfInspectorError::NotAPdf as i32);
+
+            // It must agree with the borrowed-view getter byte for byte.
+            let view = get_byte_view(|out| pdf_inspector_last_error_message(out)).unwrap();
+            assert_eq!(view.len, len);
+            let expected = std::slice::from_raw_parts(view.ptr, view.len).to_vec();
+
+            let mut full = vec![0u8; len];
+            assert_eq!(
+                pdf_inspector_last_error_copy(full.as_mut_ptr(), full.len(), std::ptr::null_mut()),
+                len
+            );
+            assert_eq!(full, expected);
+
+            // Truncation returns the full length, snprintf-style, and writes
+            // exactly `cap` bytes without touching the guard byte past it.
+            let mut small = vec![0xAAu8; len];
+            assert_eq!(
+                pdf_inspector_last_error_copy(small.as_mut_ptr(), 4, &mut code),
+                len
+            );
+            assert_eq!(&small[..4], &expected[..4]);
+            assert!(
+                small[4..].iter().all(|byte| *byte == 0xAA),
+                "must not write past `cap`"
+            );
+
+            // `code_out` is optional.
+            assert_eq!(
+                pdf_inspector_last_error_copy(full.as_mut_ptr(), full.len(), std::ptr::null_mut()),
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn handles_reject_the_wrong_free_instead_of_corrupting_the_heap() {
+        unsafe {
+            // A `CTextResult` handed to `CPdfProcessResult`'s free must be
+            // refused. If the tag check regressed this would drop the handle
+            // as the wrong type; under Miri or ASan that is a hard failure,
+            // and the reads afterwards would be use-after-free.
+            let path = CString::new(FIXTURE).unwrap();
+            let mut text = std::ptr::null_mut();
+            assert_eq!(
+                pdf_inspector_extract_text(path.as_ptr(), std::ptr::null(), &mut text),
+                PdfInspectorError::Success
+            );
+
+            pdf_inspector_process_result_free(text.cast::<CPdfProcessResult>());
+            pdf_inspector_pages_result_free(text.cast::<CPagesExtractionResult>());
+            pdf_inspector_options_free(text.cast::<CPdfOptions>());
+
+            // Still intact and still readable after all three refusals.
+            let view = get_byte_view(|out| pdf_inspector_text_result_get_text(text, out)).unwrap();
+            assert!(view.len > 0);
+
+            // Its own free still works.
+            pdf_inspector_text_result_free(text);
+
+            // An options handle passed where a result is expected is rejected
+            // by the setters too, rather than reinterpreting foreign memory.
+            let mut items = std::ptr::null_mut();
+            assert_eq!(
+                pdf_inspector_text_items_result_new(&mut items),
+                PdfInspectorError::Success
+            );
+            assert_eq!(
+                pdf_inspector_options_set_detect_headers(items.cast::<CPdfOptions>(), false),
+                PdfInspectorError::InvalidArgument
+            );
+            pdf_inspector_text_items_result_free(items);
+        }
+    }
+
+    #[test]
     fn raw_tsr_mem_matches_the_auto_path_for_well_formed_tokens() {
         unsafe {
             const TSR_FIXTURE: &str = "tests/fixtures/bits_pilani_feedback.pdf";
@@ -4805,7 +5335,7 @@ mod tests {
                 ),
                 PdfInspectorError::Success
             );
-            assert_eq!(pdf_inspector_tsr_result_get_count(raw), 1);
+            assert_eq!(pdf_inspector_tsr_result_get_table_count(raw), 1);
             let markdown =
                 get_byte_view(|out| pdf_inspector_tsr_result_get_markdown(raw, 0, out)).unwrap();
             let markdown = std::slice::from_raw_parts(markdown.ptr, markdown.len);
@@ -4933,7 +5463,7 @@ mod tests {
                 ),
                 PdfInspectorError::Success
             );
-            assert_eq!(pdf_inspector_tsr_result_get_count(path_result), 1);
+            assert_eq!(pdf_inspector_tsr_result_get_table_count(path_result), 1);
             let path_markdown =
                 get_byte_view(|out| pdf_inspector_tsr_result_get_markdown(path_result, 0, out))
                     .unwrap();
@@ -5090,7 +5620,7 @@ mod tests {
                 ),
                 PdfInspectorError::Success
             );
-            assert_eq!(pdf_inspector_tsr_result_get_count(empty_result), 0);
+            assert_eq!(pdf_inspector_tsr_result_get_table_count(empty_result), 0);
 
             let mut invalid_result = std::ptr::NonNull::dangling().as_ptr();
             assert_eq!(
@@ -5383,6 +5913,7 @@ mod tests {
     fn tsr_result_getters_preserve_empty_and_embedded_nul_strings() {
         unsafe {
             let result = Box::into_raw(Box::new(CTsrTableExtractionResult {
+                tag: CTsrTableExtractionResult::TAG,
                 results: vec![
                     crate::TableExtractionResult {
                         markdown: "a\0b".to_string(),
@@ -5394,7 +5925,7 @@ mod tests {
                     },
                 ],
             }));
-            assert_eq!(pdf_inspector_tsr_result_get_count(result), 2);
+            assert_eq!(pdf_inspector_tsr_result_get_table_count(result), 2);
             let first =
                 get_byte_view(|out| pdf_inspector_tsr_result_get_markdown(result, 0, out)).unwrap();
             assert_eq!(std::slice::from_raw_parts(first.ptr, first.len), b"a\0b");
@@ -5413,7 +5944,10 @@ mod tests {
                 get_byte_view(|out| { pdf_inspector_tsr_result_get_markdown(result, 2, out) })
                     .is_none()
             );
-            assert_eq!(pdf_inspector_tsr_result_get_count(std::ptr::null()), 0);
+            assert_eq!(
+                pdf_inspector_tsr_result_get_table_count(std::ptr::null()),
+                0
+            );
             pdf_inspector_tsr_result_free(result);
         }
     }
@@ -5422,6 +5956,7 @@ mod tests {
     fn tsr_cell_getters_preserve_empty_and_embedded_nul_text() {
         unsafe {
             let result = Box::into_raw(Box::new(CTsrStructuredCellsResult {
+                tag: CTsrStructuredCellsResult::TAG,
                 tables: vec![vec![
                     crate::tables::StructuredCell {
                         row: 2,
@@ -6007,6 +6542,7 @@ mod tests {
     fn extracted_text_with_interior_nul_round_trips() {
         unsafe {
             let text_result = Box::into_raw(Box::new(CTextResult {
+                tag: CTextResult::TAG,
                 text: "A\0C\n".into(),
             }));
             let text =
@@ -6057,9 +6593,12 @@ mod tests {
                 ),
                 PdfInspectorError::Success
             );
-            assert_eq!(pdf_inspector_pages_result_get_page_count(result), 1);
+            assert_eq!(pdf_inspector_pages_result_get_entry_count(result), 1);
             // Reported back in the same base the caller asked in.
-            assert_eq!(pdf_inspector_pages_result_get_page_number(result, 0), 1);
+            assert_eq!(
+                pdf_inspector_pages_result_get_entry_page_number(result, 0),
+                1
+            );
             pdf_inspector_pages_result_free(result);
         }
     }
@@ -6072,12 +6611,12 @@ mod tests {
                 pdf_inspector_options_add_page(options, 1),
                 PdfInspectorError::Success
             );
-            assert!((*options).page_filter.is_some());
+            assert!((*options).inner.page_filter.is_some());
             assert_eq!(
                 pdf_inspector_options_clear_pages(options),
                 PdfInspectorError::Success
             );
-            assert!((*options).page_filter.is_none());
+            assert!((*options).inner.page_filter.is_none());
             assert_eq!(
                 pdf_inspector_options_clear_pages(std::ptr::null_mut()),
                 PdfInspectorError::NullPointer
@@ -6209,7 +6748,7 @@ mod tests {
                 pdf_inspector_options_add_page(options, 0),
                 PdfInspectorError::InvalidArgument
             );
-            assert!((*options).page_filter.is_none());
+            assert!((*options).inner.page_filter.is_none());
 
             let zero = [0u32];
             assert_eq!(
@@ -6410,7 +6949,7 @@ mod tests {
             );
             let message = get_byte_view(|out| pdf_inspector_last_error_message(out)).unwrap();
 
-            let _ = pdf_inspector_result_get_page_count(std::ptr::null());
+            let _ = pdf_inspector_process_result_get_page_count(std::ptr::null());
             let current = get_byte_view(|out| pdf_inspector_last_error_message(out)).unwrap();
             assert_eq!(current.len, message.len);
             assert_eq!(current.ptr, message.ptr);
@@ -6420,7 +6959,7 @@ mod tests {
             assert_eq!(current.len, message.len);
             assert_eq!(current.ptr, message.ptr);
 
-            pdf_inspector_result_free(std::ptr::null_mut());
+            pdf_inspector_process_result_free(std::ptr::null_mut());
             let current = get_byte_view(|out| pdf_inspector_last_error_message(out)).unwrap();
             assert_eq!(current.len, message.len);
             assert_eq!(current.ptr, message.ptr);
@@ -6433,7 +6972,7 @@ mod tests {
                 PdfInspectorError::Success
             );
             assert!(get_byte_view(|out| pdf_inspector_last_error_message(out)).is_none());
-            pdf_inspector_result_free(ok_result);
+            pdf_inspector_process_result_free(ok_result);
         }
     }
 
@@ -6446,13 +6985,13 @@ mod tests {
                 pdf_inspector_options_set_base_font_size(options, 12.0),
                 PdfInspectorError::Success
             );
-            assert_eq!((*options).markdown.base_font_size, Some(12.0));
+            assert_eq!((*options).inner.markdown.base_font_size, Some(12.0));
 
             assert_eq!(
                 pdf_inspector_options_set_base_font_size(options, 0.0),
                 PdfInspectorError::Success
             );
-            assert_eq!((*options).markdown.base_font_size, None);
+            assert_eq!((*options).inner.markdown.base_font_size, None);
 
             assert_eq!(
                 pdf_inspector_options_set_base_font_size(options, 12.0),
@@ -6462,7 +7001,7 @@ mod tests {
                 pdf_inspector_options_set_base_font_size(options, -1.0),
                 PdfInspectorError::Success
             );
-            assert_eq!((*options).markdown.base_font_size, None);
+            assert_eq!((*options).inner.markdown.base_font_size, None);
 
             // A denormal must not sneak past a bare `> 0.0` check.
             assert_eq!(
@@ -6473,18 +7012,18 @@ mod tests {
                 pdf_inspector_options_set_base_font_size(options, 1e-45),
                 PdfInspectorError::Success
             );
-            assert_eq!((*options).markdown.base_font_size, None);
+            assert_eq!((*options).inner.markdown.base_font_size, None);
             assert_eq!(
                 pdf_inspector_options_set_base_font_size(options, 0.5),
                 PdfInspectorError::Success
             );
-            assert_eq!((*options).markdown.base_font_size, None);
+            assert_eq!((*options).inner.markdown.base_font_size, None);
 
             assert_eq!(
                 pdf_inspector_options_set_base_font_size(options, 1.0),
                 PdfInspectorError::Success
             );
-            assert_eq!((*options).markdown.base_font_size, Some(1.0));
+            assert_eq!((*options).inner.markdown.base_font_size, Some(1.0));
 
             assert_eq!(
                 pdf_inspector_options_set_base_font_size(options, f32::NAN),
@@ -6515,7 +7054,7 @@ mod tests {
                 PdfInspectorError::Success
             );
             assert!(matches!(
-                (*options).detection.strategy,
+                (*options).inner.detection.strategy,
                 crate::ScanStrategy::EarlyExit
             ));
 
@@ -6530,7 +7069,7 @@ mod tests {
                 PdfInspectorError::Success
             );
             assert!(matches!(
-                (*options).detection.strategy,
+                (*options).inner.detection.strategy,
                 crate::ScanStrategy::Full
             ));
 
@@ -6556,7 +7095,7 @@ mod tests {
                 PdfInspectorError::Success
             );
             assert!(matches!(
-                (*options).detection.strategy,
+                (*options).inner.detection.strategy,
                 crate::ScanStrategy::Sample(4)
             ));
 
@@ -6572,7 +7111,7 @@ mod tests {
                 ),
                 PdfInspectorError::Success
             );
-            match &(*options).detection.strategy {
+            match &(*options).inner.detection.strategy {
                 crate::ScanStrategy::Pages(got) => assert_eq!(got.as_slice(), [1, 3]),
                 other => panic!("expected ScanStrategy::Pages, got {other:?}"),
             }

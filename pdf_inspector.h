@@ -4,6 +4,44 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+/* Processing configuration: mode, detection thresholds, Markdown formatting,
+   and an optional page filter. */
+typedef struct CPdfOptions CPdfOptions;
+
+/* Result of a full processing run. */
+typedef struct CPdfProcessResult CPdfProcessResult;
+
+/* Lightweight classification result for routing decisions. */
+typedef struct CPdfClassification CPdfClassification;
+
+/* Full detector result, including sampling counts and per-page OCR reasons. */
+typedef struct CPdfTypeResult CPdfTypeResult;
+
+/* Per-page Markdown plus layout and OCR-routing metadata. */
+typedef struct CPagesExtractionResult CPagesExtractionResult;
+
+/* Extracted plain text, or converted Markdown. */
+typedef struct CTextResult CTextResult;
+
+/* Positioned text items. Also built by the caller, for the OCR round trip. */
+typedef struct CTextItemsResult CTextItemsResult;
+
+/* Structure-tree elements from a tagged PDF. */
+typedef struct CStructureElementsResult CStructureElementsResult;
+
+/* Region-based text or table extraction results. */
+typedef struct CRegionTextResult CRegionTextResult;
+
+/* Vector-grid detection result. A successful call always returns a handle,
+   including when no grid was found: call
+   pdf_inspector_vector_grid_result_is_detected() to tell the two apart. */
+typedef struct CVectorGridResult CVectorGridResult;
+
+/* Markdown tables recovered from external table-structure recognition. */
+typedef struct CTsrTableExtractionResult CTsrTableExtractionResult;
+
+/* Resolved TSR cells, one list per input descriptor, in input order. */
+typedef struct CTsrStructuredCellsResult CTsrStructuredCellsResult;
 
 /**
  * C ABI major version; bumped only for incompatible changes. See the
@@ -168,80 +206,6 @@ typedef enum {
    */
   CTextItemType_ReservedMax = 2147483647,
 } CTextItemType;
-
-/**
- * FFI wrapper around `PagesExtractionResult`.
- */
-typedef struct CPagesExtractionResult CPagesExtractionResult;
-
-/**
- * FFI wrapper around `PdfClassification`. `inner.pages_needing_ocr` is
- * normalised to 1-indexed at construction so the zero-copy getter can hand
- * back a borrowed slice.
- */
-typedef struct CPdfClassification CPdfClassification;
-
-/**
- * FFI wrapper around `PdfProcessResult`.
- */
-typedef struct CPdfProcessResult CPdfProcessResult;
-
-/**
- * FFI wrapper around the full detector's `PdfTypeResult`. OCR reasons are
- * normalised from an ordered map to a vector for stable indexed traversal.
- */
-typedef struct CPdfTypeResult CPdfTypeResult;
-
-/**
- * FFI wrapper around region-based text extraction results.
- */
-typedef struct CRegionTextResult CRegionTextResult;
-
-/**
- * FFI wrapper around tagged-PDF structure-tree elements.
- */
-typedef struct CStructureElementsResult CStructureElementsResult;
-
-/**
- * FFI wrapper around positioned text items.
- */
-typedef struct CTextItemsResult CTextItemsResult;
-
-/**
- * FFI wrapper around extracted plain text.
- */
-typedef struct CTextResult CTextResult;
-
-/**
- * FFI wrapper around raw TSR structured-cell results, one cell list per
- * input descriptor in input order.
- */
-typedef struct CTsrStructuredCellsResult CTsrStructuredCellsResult;
-
-/**
- * FFI wrapper around auto-fallback TSR table extraction results.
- */
-typedef struct CTsrTableExtractionResult CTsrTableExtractionResult;
-
-/**
- * FFI wrapper around an optional `VectorGridDetection`. A successful call
- * always returns a handle; use `pdf_inspector_vector_grid_result_is_detected`
- * to distinguish a detected grid from a valid no-grid result.
- */
-typedef struct CVectorGridResult CVectorGridResult;
-
-/**
- * Processing configuration: mode, detection thresholds, markdown formatting,
- * and an optional page filter.
- *
- * Construct one and customise it before handing it to a processing entry
- * point; the `PdfOptions::new` builder carries a Rust example. This type is
- * also exposed over the C ABI as an opaque handle, created with
- * `pdf_inspector_options_new`, configured through the
- * `pdf_inspector_options_set_*` functions, and released with
- * `pdf_inspector_options_free`.
- */
-typedef struct CPdfOptions CPdfOptions;
 
 /**
  * Borrowed UTF-8 byte view supplied to or returned by the API. The bytes are
@@ -426,8 +390,8 @@ uint32_t pdf_inspector_abi_version(void);
 uint32_t pdf_inspector_abi_minor(void);
 
 /**
- * Map one OCR-reason string, as returned by any of the `_get_ocr_reasons_reason`
- * getters or `pdf_inspector_pages_result_get_page_ocr_reason`, to a
+ * Map one OCR-reason string, as returned by any of the `_get_ocr_reason`
+ * getters or `pdf_inspector_pages_result_get_entry_ocr_reason`, to a
  * `COcrReason` discriminant. Returns `COcrReason_Unknown` for a reason this
  * library does not define, which spares callers a table of string literals.
  */
@@ -449,8 +413,49 @@ PdfInspectorError pdf_inspector_estimate_page_count_from_bytes(const uint8_t *bu
  * and zeroes `out` if that call succeeded or left no diagnostic text. Getters
  * and `*_free` never touch this slot. The view stays valid until the next
  * fallible entry-point call on this thread.
+ *
+ * # Not safe from an M:N runtime
+ *
+ * The slot is keyed to the **OS thread**. Callers whose unit of work is not
+ * an OS thread — Java virtual threads, Go goroutines without
+ * `runtime.LockOSThread`, .NET `async` continuations — must use
+ * [`pdf_inspector_last_error_copy`] instead. Another task sharing this OS
+ * thread can overwrite the slot between the failing call and this one, and
+ * because that frees the string, the returned view can dangle. See the
+ * "Error diagnostics" section of `docs/c-api.md`.
  */
 bool pdf_inspector_last_error_message(CByteView *out);
+
+/**
+ * Copy the most recent diagnostic on the calling thread into `buf`, and
+ * write the error code that produced it to `code_out` (may be NULL).
+ *
+ * Returns the diagnostic's **full** length in bytes, as `snprintf` does, so a
+ * return greater than `cap` means the copy was truncated and the return value
+ * is the buffer size needed. Returns 0 when the last fallible call succeeded
+ * or left no diagnostic text. The bytes are UTF-8 and not NUL-terminated;
+ * `buf` may be NULL only when `cap` is zero, which is how you ask for the
+ * length alone.
+ *
+ * # Prefer this over `pdf_inspector_last_error_message` off an M:N runtime
+ *
+ * [`pdf_inspector_last_error_message`] hands back a pointer into the
+ * thread-local slot, which stays valid only until this OS thread's next
+ * fallible call. When the caller's unit of work is not an OS thread — a Java
+ * virtual thread, a goroutine, a .NET `async` continuation — another task can
+ * share the same OS thread and free that string underneath the pointer.
+ *
+ * This entry point reads *and* copies inside a single call, so no other task
+ * can interleave: the diagnostic either arrives intact or does not arrive.
+ * That removes the dangling read, but not the possibility of reading a
+ * *different* task's diagnostic. `code_out` is what discriminates: it always
+ * carries the code the recorded call returned, whether or not that call left
+ * any text, so `code_out` matching the code you just got back means the slot
+ * is yours — a length of 0 then simply means your error carries no message.
+ * A mismatch means another task overwrote it. `PdfInspectorError_Success`
+ * appears only when the slot is genuinely empty.
+ */
+size_t pdf_inspector_last_error_copy(uint8_t *buf, size_t cap, int32_t *code_out);
 
 /**
  * Create a new options handle with default settings, published through
@@ -465,7 +470,7 @@ bool pdf_inspector_last_error_message(CByteView *out);
 PdfInspectorError pdf_inspector_options_new(CPdfOptions **options_out);
 
 /**
- * Free a `PdfOptions` instance.
+ * Free a `CPdfOptions` instance.
  */
 void pdf_inspector_options_free(CPdfOptions *options);
 
@@ -606,7 +611,7 @@ PdfInspectorError pdf_inspector_options_set_base_font_size(CPdfOptions *options,
  * Process a PDF file with options.
  * Returns Success on success and populates `result_out` with an opaque `CPdfProcessResult` pointer.
  * If `options` is NULL, default options are used.
- * The output result must be freed using `pdf_inspector_result_free`.
+ * The output result must be freed using `pdf_inspector_process_result_free`.
  */
 PdfInspectorError pdf_inspector_process_pdf(const char *path,
                                             const CPdfOptions *options,
@@ -616,7 +621,7 @@ PdfInspectorError pdf_inspector_process_pdf(const char *path,
  * Process PDF bytes with options. A NULL buffer is accepted only when `size` is zero.
  * Returns Success on success and populates `result_out` with an opaque `CPdfProcessResult` pointer.
  * If `options` is NULL, default options are used.
- * The output result must be freed using `pdf_inspector_result_free`.
+ * The output result must be freed using `pdf_inspector_process_result_free`.
  */
 PdfInspectorError pdf_inspector_process_pdf_mem(const uint8_t *buffer,
                                                 size_t size,
@@ -1017,37 +1022,37 @@ bool pdf_inspector_text_result_get_text(const CTextResult *result, CByteView *ou
 /**
  * Free a `CPdfProcessResult` instance.
  */
-void pdf_inspector_result_free(CPdfProcessResult *result);
+void pdf_inspector_process_result_free(CPdfProcessResult *result);
 
 /**
  * Get the detected PDF type.
  */
-CPdfType pdf_inspector_result_get_type(const CPdfProcessResult *result);
+CPdfType pdf_inspector_process_result_get_type(const CPdfProcessResult *result);
 
 /**
  * Get the total page count.
  */
-uint32_t pdf_inspector_result_get_page_count(const CPdfProcessResult *result);
+uint32_t pdf_inspector_process_result_get_page_count(const CPdfProcessResult *result);
 
 /**
  * Get the processing time in milliseconds.
  */
-uint64_t pdf_inspector_result_get_processing_time_ms(const CPdfProcessResult *result);
+uint64_t pdf_inspector_process_result_get_processing_time_ms(const CPdfProcessResult *result);
 
 /**
  * Get the confidence score (0.0 - 1.0).
  */
-float pdf_inspector_result_get_confidence(const CPdfProcessResult *result);
+float pdf_inspector_process_result_get_confidence(const CPdfProcessResult *result);
 
 /**
  * Returns true if encoding issues were detected.
  */
-bool pdf_inspector_result_has_encoding_issues(const CPdfProcessResult *result);
+bool pdf_inspector_process_result_has_encoding_issues(const CPdfProcessResult *result);
 
 /**
  * Returns true if complex layout (tables or columns) was detected.
  */
-bool pdf_inspector_result_is_complex_layout(const CPdfProcessResult *result);
+bool pdf_inspector_process_result_is_complex_layout(const CPdfProcessResult *result);
 
 /**
  * Free a `CPdfClassification` instance.
@@ -1120,31 +1125,31 @@ bool pdf_inspector_pdf_type_result_get_pages_needing_ocr(const CPdfTypeResult *r
  * Get the number of per-page OCR-reason entries on a `CPdfTypeResult`. Returns
  * zero for a NULL handle.
  */
-size_t pdf_inspector_pdf_type_result_get_ocr_reasons_count(const CPdfTypeResult *result);
+size_t pdf_inspector_pdf_type_result_get_ocr_page_count(const CPdfTypeResult *result);
 
 /**
  * Get the 1-indexed page number for one OCR-reason entry on a `CPdfTypeResult`.
  * Returns zero for a NULL handle or an out-of-range index.
  */
-uint32_t pdf_inspector_pdf_type_result_get_ocr_reasons_page(const CPdfTypeResult *result,
-                                                            size_t index);
+uint32_t pdf_inspector_pdf_type_result_get_ocr_page_number(const CPdfTypeResult *result,
+                                                           size_t index);
 
 /**
  * Get the number of reason strings in one OCR-reason entry on a `CPdfTypeResult`.
  * Returns zero for a NULL handle or an out-of-range index.
  */
-size_t pdf_inspector_pdf_type_result_get_ocr_reasons_reasons_count(const CPdfTypeResult *result,
-                                                                   size_t index);
+size_t pdf_inspector_pdf_type_result_get_ocr_page_reason_count(const CPdfTypeResult *result,
+                                                               size_t index);
 
 /**
  * Get one OCR reason's UTF-8 bytes from a `CPdfTypeResult`. Returns `false` and
  * zeroes `out` when the requested reason is absent or an input pointer is
  * NULL. The view remains valid until `result` is freed.
  */
-bool pdf_inspector_pdf_type_result_get_ocr_reasons_reason(const CPdfTypeResult *result,
-                                                          size_t index,
-                                                          size_t reason_index,
-                                                          CByteView *out);
+bool pdf_inspector_pdf_type_result_get_ocr_page_reason(const CPdfTypeResult *result,
+                                                       size_t index,
+                                                       size_t reason_index,
+                                                       CByteView *out);
 
 /**
  * Free a `CPagesExtractionResult` instance.
@@ -1154,20 +1159,20 @@ void pdf_inspector_pages_result_free(CPagesExtractionResult *result);
 /**
  * Get number of extracted pages.
  */
-size_t pdf_inspector_pages_result_get_page_count(const CPagesExtractionResult *result);
+size_t pdf_inspector_pages_result_get_entry_count(const CPagesExtractionResult *result);
 
 /**
  * Get the 1-indexed page number of the page at `index`, matching the base used
  * by every other page number in this ABI. Returns 0 for an out-of-range index.
  */
-uint32_t pdf_inspector_pages_result_get_page_number(const CPagesExtractionResult *result,
-                                                    size_t index);
+uint32_t pdf_inspector_pages_result_get_entry_page_number(const CPagesExtractionResult *result,
+                                                          size_t index);
 
 /**
  * Get whether page at index needs OCR.
  */
-bool pdf_inspector_pages_result_get_page_needs_ocr(const CPagesExtractionResult *result,
-                                                   size_t index);
+bool pdf_inspector_pages_result_get_entry_needs_ocr(const CPagesExtractionResult *result,
+                                                    size_t index);
 
 /**
  * Get whether any page has tables or columns.
@@ -1179,74 +1184,78 @@ bool pdf_inspector_pages_result_is_complex(const CPagesExtractionResult *result)
  * Markdown is absent or either pointer is NULL. The view remains valid until
  * `result` is freed.
  */
-bool pdf_inspector_result_get_markdown(const CPdfProcessResult *result, CByteView *out);
+bool pdf_inspector_process_result_get_markdown(const CPdfProcessResult *result, CByteView *out);
 
 /**
  * Get the title UTF-8 bytes. Returns `false` and zeroes `out` when the title
  * is absent or either pointer is NULL. The view remains valid until `result`
  * is freed.
  */
-bool pdf_inspector_result_get_title(const CPdfProcessResult *result, CByteView *out);
+bool pdf_inspector_process_result_get_title(const CPdfProcessResult *result, CByteView *out);
 
 /**
  * Get the borrowed array of 1-indexed page numbers needing OCR.
  */
-bool pdf_inspector_result_get_pages_needing_ocr(const CPdfProcessResult *result, CU32View *out);
+bool pdf_inspector_process_result_get_pages_needing_ocr(const CPdfProcessResult *result,
+                                                        CU32View *out);
 
 /**
  * Get the borrowed array of 1-indexed page numbers with tables.
  */
-bool pdf_inspector_result_get_pages_with_tables(const CPdfProcessResult *result, CU32View *out);
+bool pdf_inspector_process_result_get_pages_with_tables(const CPdfProcessResult *result,
+                                                        CU32View *out);
 
 /**
  * Get the borrowed array of 1-indexed page numbers with columns.
  */
-bool pdf_inspector_result_get_pages_with_columns(const CPdfProcessResult *result, CU32View *out);
+bool pdf_inspector_process_result_get_pages_with_columns(const CPdfProcessResult *result,
+                                                         CU32View *out);
 
 /**
  * Get the number of per-page OCR-reason entries on a `CPdfProcessResult`. Returns
  * zero for a NULL handle.
  */
-size_t pdf_inspector_result_get_ocr_reasons_count(const CPdfProcessResult *result);
+size_t pdf_inspector_process_result_get_ocr_page_count(const CPdfProcessResult *result);
 
 /**
  * Get the 1-indexed page number for one OCR-reason entry on a `CPdfProcessResult`.
  * Returns zero for a NULL handle or an out-of-range index.
  */
-uint32_t pdf_inspector_result_get_ocr_reasons_page(const CPdfProcessResult *result, size_t index);
+uint32_t pdf_inspector_process_result_get_ocr_page_number(const CPdfProcessResult *result,
+                                                          size_t index);
 
 /**
  * Get the number of reason strings in one OCR-reason entry on a `CPdfProcessResult`.
  * Returns zero for a NULL handle or an out-of-range index.
  */
-size_t pdf_inspector_result_get_ocr_reasons_reasons_count(const CPdfProcessResult *result,
-                                                          size_t index);
+size_t pdf_inspector_process_result_get_ocr_page_reason_count(const CPdfProcessResult *result,
+                                                              size_t index);
 
 /**
  * Get one OCR reason's UTF-8 bytes from a `CPdfProcessResult`. Returns `false` and
  * zeroes `out` when the requested reason is absent or an input pointer is
  * NULL. The view remains valid until `result` is freed.
  */
-bool pdf_inspector_result_get_ocr_reasons_reason(const CPdfProcessResult *result,
-                                                 size_t index,
-                                                 size_t reason_index,
-                                                 CByteView *out);
+bool pdf_inspector_process_result_get_ocr_page_reason(const CPdfProcessResult *result,
+                                                      size_t index,
+                                                      size_t reason_index,
+                                                      CByteView *out);
 
 /**
  * Get the page Markdown UTF-8 bytes at `index`. Returns `false` and zeroes
  * `out` for an invalid index or input pointer.
  */
-bool pdf_inspector_pages_result_get_page_markdown(const CPagesExtractionResult *result,
-                                                  size_t index,
-                                                  CByteView *out);
+bool pdf_inspector_pages_result_get_entry_markdown(const CPagesExtractionResult *result,
+                                                   size_t index,
+                                                   CByteView *out);
 
 /**
  * Get the page OCR reason UTF-8 bytes at `index`. Returns `false` and zeroes
  * `out` when the reason is absent or an input pointer is invalid.
  */
-bool pdf_inspector_pages_result_get_page_ocr_reason(const CPagesExtractionResult *result,
-                                                    size_t index,
-                                                    CByteView *out);
+bool pdf_inspector_pages_result_get_entry_ocr_reason(const CPagesExtractionResult *result,
+                                                     size_t index,
+                                                     CByteView *out);
 
 /**
  * Get the borrowed array of 1-indexed page numbers needing OCR.
@@ -1270,31 +1279,31 @@ bool pdf_inspector_pages_result_get_pages_with_columns(const CPagesExtractionRes
  * Get the number of per-page OCR-reason entries on a `CPagesExtractionResult`. Returns
  * zero for a NULL handle.
  */
-size_t pdf_inspector_pages_result_get_ocr_reasons_count(const CPagesExtractionResult *result);
+size_t pdf_inspector_pages_result_get_ocr_page_count(const CPagesExtractionResult *result);
 
 /**
  * Get the 1-indexed page number for one OCR-reason entry on a `CPagesExtractionResult`.
  * Returns zero for a NULL handle or an out-of-range index.
  */
-uint32_t pdf_inspector_pages_result_get_ocr_reasons_page(const CPagesExtractionResult *result,
-                                                         size_t index);
+uint32_t pdf_inspector_pages_result_get_ocr_page_number(const CPagesExtractionResult *result,
+                                                        size_t index);
 
 /**
  * Get the number of reason strings in one OCR-reason entry on a `CPagesExtractionResult`.
  * Returns zero for a NULL handle or an out-of-range index.
  */
-size_t pdf_inspector_pages_result_get_ocr_reasons_reasons_count(const CPagesExtractionResult *result,
-                                                                size_t index);
+size_t pdf_inspector_pages_result_get_ocr_page_reason_count(const CPagesExtractionResult *result,
+                                                            size_t index);
 
 /**
  * Get one OCR reason's UTF-8 bytes from a `CPagesExtractionResult`. Returns `false` and
  * zeroes `out` when the requested reason is absent or an input pointer is
  * NULL. The view remains valid until `result` is freed.
  */
-bool pdf_inspector_pages_result_get_ocr_reasons_reason(const CPagesExtractionResult *result,
-                                                       size_t index,
-                                                       size_t reason_index,
-                                                       CByteView *out);
+bool pdf_inspector_pages_result_get_ocr_page_reason(const CPagesExtractionResult *result,
+                                                    size_t index,
+                                                    size_t reason_index,
+                                                    CByteView *out);
 
 /**
  * Get the borrowed array of page numbers needing OCR, 1-indexed like every
@@ -1430,13 +1439,13 @@ void pdf_inspector_region_text_result_free(CRegionTextResult *result);
 /**
  * Get the number of page entries in a region-text result.
  */
-size_t pdf_inspector_region_text_result_get_page_count(const CRegionTextResult *result);
+size_t pdf_inspector_region_text_result_get_entry_count(const CRegionTextResult *result);
 
 /**
  * Get a page entry's 1-indexed page number.
  */
-uint32_t pdf_inspector_region_text_result_get_page(const CRegionTextResult *result,
-                                                   size_t page_index);
+uint32_t pdf_inspector_region_text_result_get_entry_page_number(const CRegionTextResult *result,
+                                                                size_t page_index);
 
 /**
  * Get the number of region entries for one page entry.
@@ -1521,7 +1530,7 @@ void pdf_inspector_tsr_result_free(CTsrTableExtractionResult *result);
 /**
  * Get the number of table extraction results. Returns zero for a NULL handle.
  */
-size_t pdf_inspector_tsr_result_get_count(const CTsrTableExtractionResult *result);
+size_t pdf_inspector_tsr_result_get_table_count(const CTsrTableExtractionResult *result);
 
 /**
  * Get one borrowed Markdown string. Returns false and zeroes `out` for an

@@ -28,11 +28,13 @@ LD_LIBRARY_PATH=target/release ./my_app
 
 `./scripts/test-c-consumer.sh` does exactly this (see its "dynamic-link smoke test" step) so this cannot silently regress.
 
+Runtime loaders hit the same versioned-SONAME issue. Java's `SymbolLookup.libraryLookup` (what jextract-generated bindings use) resolves through the **OS loader path** and ignores `-Djava.library.path`, so a Java consumer needs `LD_LIBRARY_PATH` set to the directory holding the library, plus the symlink above.
+
 The header is C11 and also compiles as C++. After changing `src/c_api.rs`, run `./scripts/generate-c-header.sh` (requires cbindgen 0.29.4) and `./scripts/test-c-consumer.sh`.
 
 ## Ownership and safety
 
-- **Handles are caller-owned.** Release each one exactly once, with its documented `*_free` — passing a handle to a different `*_free` is undefined behaviour.
+- **Handles are caller-owned.** Release each one exactly once, with its documented `*_free`. Each handle stores a type tag checked by every `*_free` **and every getter**, so passing a handle where a different handle type is expected is detected and ignored rather than reinterpreting the allocation: the `*_free` leaks it, a getter returns its zero value, and an entry point taking it as an argument returns `PdfInspectorError_InvalidArgument` (or, for an optional `options` argument, falls back to defaults). Do not rely on this: it is a backstop for binding generators (jextract, cgo, P/Invoke) that erase the distinct pointer types C callers get, not a licence to mix them up. Freeing the same handle twice remains undefined behaviour, and the tag gives **no** protection there — a freed block is usually reused by another handle of the same type, whose tag matches.
 - **Returned pointers are borrowed.** Never free them; they stay valid until the owning handle is freed.
 - **Strings use `CByteView`; page arrays use `CU32View`.** Each contains a borrowed `ptr` and `len`. String bytes are UTF-8, not NUL-terminated, and may contain NUL bytes, so never use `strlen`. View getters return `true` when the requested value is present, including a present-but-empty value with a non-NULL pointer and zero length. They return `false` for an absent value, invalid handle/index, or NULL output and zero the output view whenever one was supplied.
 - **Getters are total.** A NULL handle or out-of-range index returns the type's zero value (`0`, `0.0`, `false`, NULL, or an `Unknown` enum variant), never a panic — they are written to always have a defined value, and carry no panic guard of their own (see below). Functions that allocate report failure through `PdfInspectorError` and leave their out-parameter NULL, unconditionally and before any other validation can fail.
@@ -44,6 +46,23 @@ Panics are caught **only at entry points that return `PdfInspectorError`**, coll
 `map_error` (the internal `PdfError` → `PdfInspectorError` mapping) discards everything but the error code by default. `PdfInspectorError_ParseError` and `PdfInspectorError_NotAPdf` can carry more: the underlying `PdfError::Parse`/`PdfError::NotAPdf` variants wrap a diagnostic string (a lopdf parse failure, or a "file appears to be X" hint). Read it with `pdf_inspector_last_error_message(&view)`, which returns `true` when a diagnostic is present.
 
 The diagnostic is scoped to **the calling thread's most recent `PdfInspectorError`-returning call** — not "the most recent call" in general. Getters and `*_free` return no `PdfInspectorError`, so they never touch this slot: reading it after one of those still reflects whatever the last fallible call left behind. Only a call that itself returns `PdfInspectorError` clears the slot at the start of the call (via the same internal panic-guard path every such function funnels through) and repopulates it if that call fails with a message. The borrowed view stays valid until the next such call on the same thread. Read it immediately after the failing call, on that same thread.
+
+### If your unit of work is not an OS thread
+
+"That same thread" means the same **OS** thread. On a runtime that multiplexes tasks onto a smaller pool of OS threads — Java virtual threads, Go goroutines without `runtime.LockOSThread`, .NET `async` continuations — `pdf_inspector_last_error_message` is **unsafe**, in two escalating ways:
+
+1. Another task sharing your OS thread can fail in between your call and your read, so you get *its* diagnostic instead of yours. The message looks entirely plausible.
+2. Worse, that other task's call **clears the slot first**, which frees the string. The pointer you were handed then dangles, and reading it is a use-after-free.
+
+Both are reachable from ordinary safe code on such a runtime, with no misuse of the contract above.
+
+Keeping the two calls adjacent does **not** fix this. A task can be descheduled at any point between two calls into this library, so there is no ordering a caller can adopt that makes the pairing safe. Testing this is also misleading: a blocking operation between the two calls tends to serialise the tasks and *mask* the failure, so the interleaving is most likely precisely when nothing sits between them.
+
+Use `pdf_inspector_last_error_copy(buf, cap, &code)` instead. It reads the slot and copies the bytes out inside a single call, so nothing can interleave and there is no pointer left to dangle. It returns the full length like `snprintf`, and writes to `code_out` the error code of whichever call last recorded into the slot — always, whether or not that call left any message text. That is what makes `code_out` usable as a check: if it equals the code your failing call just returned, the slot is yours, and a length of 0 simply means your error carries no diagnostic text (most codes don't — only `ParseError` and `NotAPdf` do). If it differs, another task overwrote the slot. `PdfInspectorError_Success` appears only when the slot is genuinely empty.
+
+That check is strong but not a proof: two tasks failing with the same code are indistinguishable. Closing point 1 entirely would need the failing call itself to deliver the message; if you need that certainty, confine both calls to a dedicated platform/OS thread.
+
+Plain C callers, and anyone on a 1:1 threading model, can keep using `pdf_inspector_last_error_message` — none of this applies there.
 
 ## Page numbers
 
@@ -75,11 +94,11 @@ int main(void) {
     }
 
     CByteView markdown = {0};
-    if (pdf_inspector_result_get_markdown(result, &markdown)) {
+    if (pdf_inspector_process_result_get_markdown(result, &markdown)) {
         fwrite(markdown.ptr, 1, markdown.len, stdout); // borrowed; do not free
     }
 
-    pdf_inspector_result_free(result);
+    pdf_inspector_process_result_free(result);
     pdf_inspector_options_free(options);
     return 0;
 }
@@ -91,7 +110,7 @@ int main(void) {
 
 | Area | Functions |
 | --- | --- |
-| Version / diagnostics | `pdf_inspector_abi_version`, `_abi_minor`, `_last_error_message` |
+| Version / diagnostics | `pdf_inspector_abi_version`, `_abi_minor`, `_last_error_message`, `_last_error_copy` |
 | Triage | `pdf_inspector_estimate_page_count_from_bytes`, `pdf_inspector_ocr_reason_from_string` |
 | Options | `pdf_inspector_options_new` / `_free` (→ `CPdfOptions`), `_set_mode`, `_set_password`, `_add_page`, `_clear_pages`, `_set_profile`, `_set_base_font_size`, `_set_scan_strategy`, and per-flag markdown/detection setters |
 | Processing | `pdf_inspector_process_pdf`, `_process_pdf_mem` → `CPdfProcessResult` |
@@ -122,7 +141,7 @@ Positioned-item Markdown conversion borrows an existing `CTextItemsResult`, leav
 
 Caller-built positioned items close the OCR round trip: region extraction reports `needs_ocr` regions, the caller runs its own OCR, and `pdf_inspector_text_items_result_new` plus `pdf_inspector_text_items_result_add` turn that output into a `CTextItemsResult` accepted everywhere an extracted one is — the getters and `pdf_inspector_to_markdown_from_items` included — and freed the same way. `_add` takes a borrowed array of `CTextItemDescriptor` values and copies every string, so the input needs to remain valid only for the duration of the call; it is atomic for every `PdfInspectorError` it reports, appending nothing when any descriptor is rejected. `PdfInspectorError_Panic` is the one exception: an allocation failure while appending an already-validated batch can leave part of it in place. Descriptor coordinates use the same bottom-left-origin PDF-point space the positioned-item getters return (not region extraction's top-left origin). The per-field contract — item types, the `PDF_INSPECTOR_TEXT_ITEM_FLAG_*` bits, and what is rejected — is documented on `CTextItemDescriptor` in the header; descriptor pages follow the [page-number rule](#page-numbers) like everything else.
 
-Join positioned text to semantic roles by matching `(page, mcid)` between `CTextItemsResult` and `CStructureElementsResult`, checking `pdf_inspector_text_items_result_has_mcid` before reading an item's MCID.
+Join positioned text to semantic roles by matching `(page, mcid)` between `CTextItemsResult` and `CStructureElementsResult`: test `CTextItemMetrics.flags` for `PDF_INSPECTOR_TEXT_ITEM_FLAG_HAS_MCID` on the item side, and check the `bool` returned by `pdf_inspector_structure_elements_result_get_mcid` on the element side.
 
 Region extraction takes an array of `CPageRegions` descriptors. Each descriptor has a 1-indexed page number and a borrowed array of `CRegion` rectangles in PDF points with a top-left origin. The output preserves both array dimensions and input order. Input arrays need to remain valid only for the duration of the call; the result handle owns its output.
 

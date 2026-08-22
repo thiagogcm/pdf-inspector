@@ -6,6 +6,51 @@ cpp_compat = true
 # Only the headers the ABI actually uses.
 no_includes = true
 sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
+# The handle types are `#[repr(C)]` on the Rust side so `free_handle` can read
+# each one's leading type tag at a known offset. That makes cbindgen willing to
+# emit their bodies, which it cannot do correctly — the fields are Rust types.
+# Declare them opaque here and exclude the generated bodies below; CI
+# regenerates this header and diffs it, so the two lists cannot drift apart
+# unnoticed.
+after_includes = """
+/* Processing configuration: mode, detection thresholds, Markdown formatting,
+   and an optional page filter. */
+typedef struct CPdfOptions CPdfOptions;
+
+/* Result of a full processing run. */
+typedef struct CPdfProcessResult CPdfProcessResult;
+
+/* Lightweight classification result for routing decisions. */
+typedef struct CPdfClassification CPdfClassification;
+
+/* Full detector result, including sampling counts and per-page OCR reasons. */
+typedef struct CPdfTypeResult CPdfTypeResult;
+
+/* Per-page Markdown plus layout and OCR-routing metadata. */
+typedef struct CPagesExtractionResult CPagesExtractionResult;
+
+/* Extracted plain text, or converted Markdown. */
+typedef struct CTextResult CTextResult;
+
+/* Positioned text items. Also built by the caller, for the OCR round trip. */
+typedef struct CTextItemsResult CTextItemsResult;
+
+/* Structure-tree elements from a tagged PDF. */
+typedef struct CStructureElementsResult CStructureElementsResult;
+
+/* Region-based text or table extraction results. */
+typedef struct CRegionTextResult CRegionTextResult;
+
+/* Vector-grid detection result. A successful call always returns a handle,
+   including when no grid was found: call
+   pdf_inspector_vector_grid_result_is_detected() to tell the two apart. */
+typedef struct CVectorGridResult CVectorGridResult;
+
+/* Markdown tables recovered from external table-structure recognition. */
+typedef struct CTsrTableExtractionResult CTsrTableExtractionResult;
+
+/* Resolved TSR cells, one list per input descriptor, in input order. */
+typedef struct CTsrStructuredCellsResult CTsrStructuredCellsResult;"""
 
 [enum]
 prefix_with_name = true
@@ -17,10 +62,20 @@ prefix_with_name = true
 # `CTextItemMetrics.item_type` as a plain `int32_t`.
 include = ["CProcessMode", "CMarkdownProfile", "CScanStrategy", "CTextItemType"]
 # Unrelated to the C ABI (src/vision/render.rs) and mistyped once exported.
-exclude = ["DEFAULT_RENDER_DPI", "DEFAULT_MAX_OUTPUT_BYTES"]
+exclude = [
+    "DEFAULT_RENDER_DPI",
+    "DEFAULT_MAX_OUTPUT_BYTES",
+    "CPdfOptions",
+    "CPdfProcessResult",
+    "CPdfClassification",
+    "CPdfTypeResult",
+    "CPagesExtractionResult",
+    "CTextResult",
+    "CTextItemsResult",
+    "CStructureElementsResult",
+    "CRegionTextResult",
+    "CVectorGridResult",
+    "CTsrTableExtractionResult",
+    "CTsrStructuredCellsResult",
+]
 
-[export.rename]
-# The options handle is the one ABI type whose Rust name is the crate's own
-# `PdfOptions`. Every other exported type is `C`-prefixed, and an unprefixed
-# `PdfOptions` is an unusually generic tag to claim in C's flat namespace.
-"PdfOptions" = "CPdfOptions"
