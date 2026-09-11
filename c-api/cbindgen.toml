@@ -1,0 +1,9 @@
+style = "type"
+language = "C"
+usize_is_size_t = true
+include_guard = "PDF_INSPECTOR_H"
+cpp_compat = true
+no_includes = true
+sys_includes = ["stddef.h", "stdint.h"]
+[export]
+exclude = ["DEFAULT_RENDER_DPI", "DEFAULT_MAX_OUTPUT_BYTES"]

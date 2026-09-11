@@ -349,6 +349,116 @@ pub fn extract_text_with_positions_and_rotations_mem_with_options(
     Ok((items, page_rotations))
 }
 
+/// Positioned page content in raw PDF user space (no visible-page-box shift),
+/// plus the per-page letter-spacing thresholds and rotated-page frames the
+/// Markdown pipeline consumes.
+#[derive(Debug, Default)]
+pub struct PositionedPageContent {
+    pub items: Vec<TextItem>,
+    pub rects: Vec<PdfRect>,
+    pub lines: Vec<PdfLine>,
+    /// Adaptive word-gap thresholds for letter-spaced pages, keyed by
+    /// 1-indexed page.
+    pub thresholds: HashMap<u32, f32>,
+    /// Frames of pages whose text was predominantly rotated; see
+    /// [`extract_text_with_positions_and_rotations_mem`].
+    pub rotations: HashMap<u32, geometry::PageRotation>,
+}
+
+/// Extract items, path rectangles, and line segments from a memory buffer in
+/// one parse, in PDF user space. `page_filter` holds 1-indexed pages; `None`
+/// extracts every page.
+pub fn extract_positioned_page_content_mem(
+    buffer: &[u8],
+    page_filter: Option<&HashSet<u32>>,
+) -> Result<PositionedPageContent, PdfError> {
+    crate::validate_pdf_bytes(buffer)?;
+    let (doc, _) = crate::load_document_from_mem(buffer)?;
+    let font_cmaps = FontCMaps::from_doc(&doc);
+    let ((items, rects, lines), thresholds, _gid_pages, rotations) =
+        extract_positioned_text_from_doc(&doc, &font_cmaps, page_filter)?;
+    Ok(PositionedPageContent {
+        items,
+        rects,
+        lines,
+        thresholds,
+        rotations,
+    })
+}
+
+/// Per-page coordinate frames: the visible box as laid out (`sheet_*`, raw
+/// user-space origin included for render transforms) and as rendered
+/// (`display_*`, turned clockwise by the inheritable `/Rotate`).
+/// `rotation_degrees` is the applied turn (0/90/180/270, snapped like
+/// renderers). Pages are 1-indexed like `TextItem::page`.
+#[derive(Debug, Clone, Copy)]
+pub struct PageFrameInfo {
+    pub page: u32,
+    pub sheet_x0: f32,
+    pub sheet_y0: f32,
+    pub sheet_width: f32,
+    pub sheet_height: f32,
+    pub display_width: f32,
+    pub display_height: f32,
+    pub rotation_degrees: u32,
+}
+
+/// Page frames for every page in a memory buffer, in document order.
+pub fn page_frame_info_mem(buffer: &[u8]) -> Result<Vec<PageFrameInfo>, PdfError> {
+    crate::validate_pdf_bytes(buffer)?;
+    let (doc, _) = crate::load_document_from_mem(buffer)?;
+    let pages = doc.get_pages();
+    let mut out = Vec::with_capacity(pages.len());
+    for (page, id) in &pages {
+        let sheet = visible_page_box(&doc, *id).unwrap_or(PageBox::LETTER);
+        let rotate = display_frame::page_rotate(&doc, *id);
+        let (display_width, display_height) = rotate.display_size(&sheet);
+        out.push(PageFrameInfo {
+            page: *page,
+            sheet_x0: sheet.x0,
+            sheet_y0: sheet.y0,
+            sheet_width: sheet.width(),
+            sheet_height: sheet.height(),
+            display_width,
+            display_height,
+            rotation_degrees: rotate.degrees() as u32,
+        });
+    }
+    out.sort_by_key(|info| info.page);
+    Ok(out)
+}
+
+/// [`extract_positioned_page_content_mem`] in the visible-page-box frame
+/// ([`extract_text_with_positions`]), or in the rendered frame when `frame`
+/// is [`PositionFrame::Display`] (see
+/// [`extract_text_with_positions_mem_in_frame`]). Geometry is lower-left
+/// origin, `y` up; `rotations` keeps reporting predominantly rotated pages in
+/// both frames.
+pub fn extract_positioned_page_content_mem_in_frame(
+    buffer: &[u8],
+    page_filter: Option<&HashSet<u32>>,
+    frame: PositionFrame,
+) -> Result<PositionedPageContent, PdfError> {
+    crate::validate_pdf_bytes(buffer)?;
+    let (doc, _) = crate::load_document_from_mem(buffer)?;
+    let font_cmaps = FontCMaps::from_doc(&doc);
+    let ((mut items, mut rects, mut lines), thresholds, _gid_pages, rotations) =
+        extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter)?;
+    if frame == PositionFrame::Display {
+        display_frame::document_items_to_display_frame(&doc, &mut items, &rotations);
+        display_frame::document_rects_lines_to_display_frame(
+            &doc, &mut rects, &mut lines, &rotations,
+        );
+    }
+    Ok(PositionedPageContent {
+        items,
+        rects,
+        lines,
+        thresholds,
+        rotations,
+    })
+}
+
 /// One page's geometry in the visible-page-box frame, from
 /// [`extract_page_text_items_in_page_box`].
 pub(crate) struct PageBoxExtraction {
