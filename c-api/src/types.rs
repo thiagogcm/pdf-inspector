@@ -1,0 +1,574 @@
+//! Public C records. Geometry defaults to the sheet frame (unrotated
+//! visible-page points, y-down); `PdfRequest.frame` selects the display frame
+//! for rendered-page coordinates instead.
+
+pub const PDF_OK: i32 = 0;
+pub const PDF_INVALID_ARGUMENT: i32 = 1;
+pub const PDF_IO_ERROR: i32 = 2;
+pub const PDF_PASSWORD_ERROR: i32 = 3;
+pub const PDF_PARSE_ERROR: i32 = 4;
+pub const PDF_UNSUPPORTED: i32 = 5;
+pub const PDF_RUNTIME_ERROR: i32 = 6;
+pub const PDF_PANIC: i32 = 7;
+
+pub const PDF_SOURCE_BYTES: u32 = 0;
+pub const PDF_SOURCE_PATH: u32 = 1;
+pub const PDF_INSPECTION: u32 = 1;
+pub const PDF_MARKDOWN: u32 = 2;
+pub const PDF_TEXT: u32 = 4;
+pub const PDF_ITEMS: u32 = 8;
+pub const PDF_STRUCTURE: u32 = 16;
+pub const PDF_GEOMETRY: u32 = 32;
+pub const PDF_RENDER: u32 = 64;
+pub const PDF_ANALYSIS: u32 = 128;
+pub const PDF_TABLES: u32 = 256;
+/// Result-only projection returned by runtime preparation.
+pub const PDF_RUNTIME: u32 = 512;
+/// Coordinate frame for page-space geometry: the visible page box as laid out
+/// in the content stream (`/Rotate` not applied).
+pub const PDF_FRAME_SHEET: u32 = 0;
+/// Rendered-page frame: the visible box turned clockwise by the inheritable
+/// `/Rotate`, so region rects can be taken from a page image and items sit
+/// where a renderer draws them.
+pub const PDF_FRAME_DISPLAY: u32 = 1;
+pub const PDF_CAP_RENDER: u32 = 1;
+pub const PDF_CAP_OCR: u32 = 2;
+pub const PDF_CAP_DOWNLOAD: u32 = 4;
+pub const PDF_CAP_EXTERNAL_OCR: u32 = 8;
+pub const PDF_OCR_OFF: u32 = 0;
+pub const PDF_OCR_AUTO: u32 = 1;
+pub const PDF_OCR_FORCE: u32 = 2;
+pub const PDF_DOWNLOAD_IF_MISSING: u32 = 0;
+pub const PDF_DOWNLOAD_OFFLINE: u32 = 1;
+pub const PDF_RGB8: u32 = 0;
+pub const PDF_RGBA8: u32 = 1;
+pub const PDF_GRAY8: u32 = 2;
+pub const PDF_REGION_TEXT: u32 = 0;
+pub const PDF_REGION_TABLE: u32 = 1;
+pub const PDF_REGION_GRID: u32 = 2;
+pub const PDF_TSR_AUTO: u32 = 0;
+pub const PDF_TSR_STRICT: u32 = 1;
+pub const PDF_COMPOSE_TEXT: u32 = 0;
+pub const PDF_COMPOSE_ITEMS: u32 = 1;
+pub const PDF_TYPE_TEXT: u32 = 0;
+pub const PDF_TYPE_SCANNED: u32 = 1;
+pub const PDF_TYPE_IMAGE: u32 = 2;
+pub const PDF_TYPE_MIXED: u32 = 3;
+pub const PDF_SCAN_SAMPLE: u32 = 0;
+pub const PDF_SCAN_FULL: u32 = 1;
+pub const PDF_SCAN_EARLY_EXIT: u32 = 2;
+pub const PDF_SCAN_PAGES: u32 = 3;
+pub const PDF_PROFILE_COMPACT: u32 = 0;
+pub const PDF_PROFILE_FIDELITY: u32 = 1;
+pub const PDF_ITEM_TEXT: u32 = 0;
+pub const PDF_ITEM_IMAGE: u32 = 1;
+pub const PDF_ITEM_LINK: u32 = 2;
+pub const PDF_ITEM_FORM_FIELD: u32 = 3;
+pub const PDF_BOLD: u32 = 1;
+pub const PDF_ITALIC: u32 = 2;
+pub const PDF_UNDERLINE: u32 = 4;
+pub const PDF_STRIKEOUT: u32 = 8;
+pub const PDF_HAS_MCID: u32 = 16;
+pub const PDF_ADVANCE_KNOWN: u32 = 32;
+/// Decoding provenance: legacy private-use symbol cleanup changed a character.
+/// Absence does not guarantee decoding accuracy.
+pub const PDF_LEGACY_SYMBOL_REWRITE: u32 = 64;
+pub const PDF_PAGE_NEEDS_OCR: u32 = 1;
+pub const PDF_PAGE_HAS_TABLES: u32 = 2;
+pub const PDF_PAGE_HAS_COLUMNS: u32 = 4;
+pub const PDF_PAGE_OCR_RAN: u32 = 8;
+pub const PDF_PAGE_HOSTED_RECOMMENDED: u32 = 16;
+pub const PDF_PAGE_ENCODING_ISSUES: u32 = 32;
+pub const PDF_CONTENT_NATIVE: u32 = 0;
+pub const PDF_CONTENT_OCR: u32 = 1;
+pub const PDF_CONTENT_FUSED: u32 = 2;
+pub const PDF_HAS_CONFIDENCE: u32 = 1;
+pub const PDF_HAS_ORIENTATION: u32 = 2;
+pub const PDF_REGION_NEEDS_OCR: u32 = 1;
+pub const PDF_REGION_GRID_FOUND: u32 = 2;
+pub const PDF_CELL_HEADER: u32 = 1;
+pub const PDF_CELL_HAS_BOUNDS: u32 = 2;
+pub const PDF_CELL_SPAN_KNOWN: u32 = 4;
+pub const PDF_TABLE_FROM_HINT: u32 = 1;
+pub const PDF_TABLE_HAS_BOUNDS: u32 = 2;
+
+pub const PDF_MD_HEADERS: u32 = 1;
+pub const PDF_MD_LISTS: u32 = 2;
+pub const PDF_MD_CODE: u32 = 4;
+pub const PDF_MD_REMOVE_PAGE_NUMBERS: u32 = 8;
+pub const PDF_MD_URLS: u32 = 16;
+pub const PDF_MD_HYPHENATION: u32 = 32;
+pub const PDF_MD_BOLD: u32 = 64;
+pub const PDF_MD_ITALIC: u32 = 128;
+pub const PDF_MD_UNDERLINE: u32 = 256;
+pub const PDF_MD_IMAGES: u32 = 512;
+pub const PDF_MD_LINKS: u32 = 1024;
+pub const PDF_MD_PAGE_NUMBERS: u32 = 2048;
+pub const PDF_MD_STRIP_FURNITURE: u32 = 4096;
+
+/// UTF-8 text or binary bytes, never NUL-terminated. NULL/0 denotes absence;
+/// non-NULL/0 denotes a present empty value. Output storage belongs to its result.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfBytes {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfSource {
+    pub kind: u32,
+    pub data: PdfBytes,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfOpenOptions {
+    pub password: PdfBytes,
+}
+/// Axis-aligned bounds in the request's frame (`PDF_FRAME_*`), top-left origin.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfBox {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfPoint {
+    pub x: f32,
+    pub y: f32,
+}
+/// Affine mapping: x' = a*x + c*y + e; y' = b*x + d*y + f.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfTransform {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfMarkdownOptions {
+    pub flags: u32,
+    pub profile: u32,
+    pub base_font_size: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfDetectionOptions {
+    pub strategy: u32,
+    pub sample_size: u32,
+    pub min_text_ops: u32,
+    pub text_page_ratio: f32,
+    pub pages: PdfPageNumbers,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRenderOptions {
+    pub dpi: f32,
+    pub format: u32,
+    pub annotations: u32,
+    pub form_fields: u32,
+    pub max_page_bytes: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfOcrOptions {
+    pub mode: u32,
+    pub download_policy: u32,
+    pub minimum_confidence: f32,
+    pub hosted_confidence: f32,
+    pub model_directory: PdfBytes,
+}
+/// Prepare selected native capabilities without a PDF. Initialized policy is offline.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRuntimeOptions {
+    pub capabilities: u32,
+    pub download_policy: u32,
+    pub model_directory: PdfBytes,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRuntimeInfo {
+    pub ready: u32,
+    pub model: PdfBytes,
+    pub model_revision: PdfBytes,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRegionInput {
+    pub page: u32,
+    pub kind: u32,
+    pub bounds: PdfBox,
+}
+/// Cell quadrilateral in page points; four corners in perimeter order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfQuad {
+    pub points: [PdfPoint; 4],
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfTableInput {
+    pub page: u32,
+    pub mode: u32,
+    pub bounds: PdfBox,
+    pub tokens: PdfStrings,
+    pub cells: PdfQuads,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfOcrSpan {
+    pub text: PdfBytes,
+    pub polygon: PdfQuad,
+    pub confidence: f32,
+    pub orientation: f32,
+    pub flags: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfOcrPageInput {
+    pub page: u32,
+    pub flags: u32,
+    pub confidence: f32,
+    pub processing_ms: u64,
+    pub model: PdfBytes,
+    pub model_revision: PdfBytes,
+    pub warnings: PdfStrings,
+    pub spans: PdfOcrSpans,
+}
+/// Initialize with pdf_inspector_request_init. Empty page selection means all
+/// pages. Page lists are sets; query batches preserve input order. `frame`
+/// selects the coordinate frame for page dimensions, positioned runs,
+/// path geometry, and region rects (see `PDF_FRAME_*`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRequest {
+    pub outputs: u32,
+    pub pages: PdfPageNumbers,
+    pub markdown: PdfMarkdownOptions,
+    pub detection: PdfDetectionOptions,
+    pub render: PdfRenderOptions,
+    pub ocr: PdfOcrOptions,
+    pub regions: PdfRegionInputs,
+    pub tables: PdfTableInputs,
+    pub external_ocr: PdfOcrPageInputs,
+    pub frame: u32,
+}
+/// Complete positioned run. Rotation is clockwise; positive baseline_shift
+/// denotes superscript. MCID is meaningful only when PDF_HAS_MCID is set.
+/// PDF_LEGACY_SYMBOL_REWRITE is decoding provenance, not an OCR verdict.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfItem {
+    pub page: u32,
+    pub kind: u32,
+    pub flags: u32,
+    pub bounds: PdfBox,
+    pub font_size: f32,
+    pub rotation: f32,
+    pub baseline_shift: f32,
+    pub mcid: i64,
+    pub text: PdfBytes,
+    pub font: PdfBytes,
+    pub font_tag: PdfBytes,
+    pub link: PdfBytes,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfStructureElement {
+    pub page: u32,
+    pub mcid: i64,
+    pub role: PdfBytes,
+}
+/// A semantic node in preorder. IDs are 1-based; parent 0 denotes a root.
+/// References with page 0 have an unresolved page in the source structure.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfStructureNode {
+    pub id: usize,
+    pub parent: usize,
+    pub role: PdfBytes,
+    pub alt_text: PdfBytes,
+    pub actual_text: PdfBytes,
+    pub language: PdfBytes,
+    pub references: PdfContentReferences,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfContentReference {
+    pub page: u32,
+    pub mcid: i64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRectangle {
+    pub page: u32,
+    pub bounds: PdfBox,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfSegment {
+    pub page: u32,
+    pub start: PdfPoint,
+    pub end: PdfPoint,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfPageInfo {
+    pub page: u32,
+    pub width: f32,
+    pub height: f32,
+    pub rotation: u32,
+}
+/// Caller-owned composition input. Page dimensions are required for items.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfComposeInput {
+    pub kind: u32,
+    pub text: PdfBytes,
+    pub pages: PdfPageInfos,
+    pub items: PdfItems,
+    pub rectangles: PdfRectangles,
+    pub lines: PdfSegments,
+    pub structure: PdfStructureElements,
+    pub markdown: PdfMarkdownOptions,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfImage {
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub format: u32,
+    pub pixels: PdfBytes,
+    pub pixel_to_page: PdfTransform,
+    pub page_to_pixel: PdfTransform,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfProvenance {
+    pub source: u32,
+    pub flags: u32,
+    pub confidence: f32,
+    pub render_dpi: f32,
+    pub render_ms: u64,
+    pub ocr_ms: u64,
+    pub assembly_ms: u64,
+    pub model: PdfBytes,
+    pub model_revision: PdfBytes,
+    pub warnings: PdfStrings,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfPage {
+    pub info: PdfPageInfo,
+    pub flags: u32,
+    pub markdown: PdfBytes,
+    pub text: PdfBytes,
+    pub ocr_reasons: PdfStrings,
+    pub items: PdfItems,
+    pub structure: PdfStructureElements,
+    pub rectangles: PdfRectangles,
+    pub lines: PdfSegments,
+    pub image: PdfImage,
+    pub provenance: PdfProvenance,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfCell {
+    pub row: usize,
+    pub column: usize,
+    pub row_span: usize,
+    pub column_span: usize,
+    pub flags: u32,
+    pub bounds: PdfBox,
+    pub text: PdfBytes,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRegion {
+    pub page: u32,
+    pub kind: u32,
+    pub flags: u32,
+    pub bounds: PdfBox,
+    pub text: PdfBytes,
+    pub ocr_reason: PdfBytes,
+    pub tokens: PdfStrings,
+    pub cells: PdfBoxes,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfTable {
+    pub page: u32,
+    pub flags: u32,
+    /// Index in request.tables for hinted results; meaningful only with PDF_TABLE_FROM_HINT.
+    pub input_index: usize,
+    pub bounds: PdfBox,
+    pub markdown: PdfBytes,
+    pub fallback_reason: PdfBytes,
+    pub cells: PdfCells,
+}
+/// One immutable graph of borrowed records. All nested storage lasts until
+/// pdf_inspector_result_free, independently of the source document.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfResultView {
+    pub present: u32,
+    pub pdf_type: u32,
+    pub page_count: u32,
+    pub confidence: f32,
+    pub has_encoding_issues: u32,
+    pub processing_ms: u64,
+    pub title: PdfBytes,
+    pub markdown: PdfBytes,
+    pub text: PdfBytes,
+    pub pages: PdfPages,
+    pub regions: PdfRegions,
+    pub tables: PdfTables,
+    pub structure_nodes: PdfStructureNodes,
+    pub runtime: PdfRuntimeInfo,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfDiagnostic {
+    pub status: i32,
+    pub message: PdfBytes,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfPageNumbers {
+    pub ptr: *const u32,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfStrings {
+    pub ptr: *const PdfBytes,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfQuads {
+    pub ptr: *const PdfQuad,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfBoxes {
+    pub ptr: *const PdfBox,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfItems {
+    pub ptr: *const PdfItem,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfPageInfos {
+    pub ptr: *const PdfPageInfo,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfStructureElements {
+    pub ptr: *const PdfStructureElement,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRectangles {
+    pub ptr: *const PdfRectangle,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfSegments {
+    pub ptr: *const PdfSegment,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRegionInputs {
+    pub ptr: *const PdfRegionInput,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfTableInputs {
+    pub ptr: *const PdfTableInput,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfOcrSpans {
+    pub ptr: *const PdfOcrSpan,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfOcrPageInputs {
+    pub ptr: *const PdfOcrPageInput,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfPages {
+    pub ptr: *const PdfPage,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfRegions {
+    pub ptr: *const PdfRegion,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfTables {
+    pub ptr: *const PdfTable,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfCells {
+    pub ptr: *const PdfCell,
+    pub len: usize,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfStructureNodes {
+    pub ptr: *const PdfStructureNode,
+    pub len: usize,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfContentReferences {
+    pub ptr: *const PdfContentReference,
+    pub len: usize,
+}
