@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/c-api/target/
 /wasm/target/
 /wasm/pkg/
 debug/

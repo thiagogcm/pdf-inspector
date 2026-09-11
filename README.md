@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/pdf-inspector.svg)](https://pypi.org/project/pdf-inspector/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Fast Rust library for PDF classification and text extraction. By default it detects whether a PDF is text-based or scanned, extracts text with position awareness, and converts to clean Markdown without OCR. Native Rust and CLI consumers can opt into selective OCR. Includes bindings for [Python](docs/python.md), [Node.js](napi/README.md), and [browser WebAssembly](wasm/README.md).
+Fast Rust library for PDF classification and text extraction. By default it detects whether a PDF is text-based or scanned, extracts text with position awareness, and converts to clean Markdown without OCR. Native Rust and CLI consumers can opt into selective OCR. Includes bindings for [Python](docs/python.md), [Node.js](napi/README.md), [browser WebAssembly](wasm/README.md), and a [C ABI](docs/c-api.md).
 
 Built by [Firecrawl](https://firecrawl.dev) to handle text-based PDFs locally in under 200ms, skipping expensive OCR services for the ~54% of PDFs that don't need them.
 
@@ -220,6 +220,7 @@ The document is loaded **once** via `load_document_from_path` / `load_document_f
 ### Project structure
 
 ```
+c-api/                  — Independent C bindings crate, header, and consumer tests
 src/
   lib.rs                — Public API, PdfOptions builder, convenience functions
   python.rs             — PyO3 Python bindings

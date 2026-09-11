@@ -654,7 +654,8 @@ fn clone_native_page(page: &PageMarkdown) -> PageMarkdown {
     }
 }
 
-fn cached_ocr_engine(options: &OcrOptions) -> Result<Arc<OarOcrEngine>, OcrPipelineError> {
+/// Resolve models and initialize (or reuse) the process-cached OCR engine.
+pub fn cached_ocr_engine(options: &OcrOptions) -> Result<Arc<OarOcrEngine>, OcrPipelineError> {
     let store = ModelStore::from_options(options)?;
     let key = OcrEngineCacheKey {
         model_root: normalized_cache_path(store.model_root(&PP_OCR_V6_SMALL)),

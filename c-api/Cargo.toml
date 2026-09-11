@@ -1,0 +1,25 @@
+[package]
+name = "pdf-inspector-c-api"
+version = "1.20.0"
+edition = "2021"
+rust-version = "1.88"
+description = "C bindings for pdf-inspector"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "pdf_inspector_c"
+
+[dependencies]
+lopdf = "0.45.0"
+pdf-inspector = { path = "..", features = ["vision"] }
+
+[dev-dependencies]
+tempfile = "3.3"
+
+[features]
+default = []
+model-download = ["pdf-inspector/model-download"]
+ocr = ["model-download", "pdf-inspector/ocr", "render-pdfium"]
+render-pdfium = ["pdf-inspector/render-pdfium"]

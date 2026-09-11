@@ -45,6 +45,69 @@ jobs:
       - name: Test developer scripts
         run: python3 -m unittest discover -s scripts/tests
 
+  c-abi:
+    name: C ABI
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.98.0"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: c-abi-${{ matrix.os }}
+          workspaces: c-api -> target
+
+      - name: Install cbindgen
+        # Pin lives in the script, which also enforces it at runtime; reading
+        # it here keeps the two from drifting apart silently.
+        run: |
+          version=$(sed -n 's/^CBINDGEN_VERSION=//p' c-api/scripts/generate-c-header.sh)
+          cargo install cbindgen --version "$version" --locked
+
+      # Regenerates the header as its first step, so the drift check below
+      # covers it too -- no need to run cbindgen over the crate twice.
+      - name: Run C consumer
+        run: ./c-api/scripts/test-c-consumer.sh
+
+      - name: Verify generated header is committed
+        run: git diff --exit-code -- c-api/pdf_inspector.h
+
+      - name: ASan + UBSan C consumer
+        if: runner.os == 'Linux'
+        # Instruments only the C side of the FFI boundary (the staticlib
+        # itself is a plain, non-instrumented Rust build); Rust-side heap
+        # errors would need `-Zsanitizer=address` on nightly Rust.
+        run: |
+          ${CC:-cc} -std=c11 -g -fsanitize=address,undefined -Ic-api c-api/tests/c_consumer.c c-api/target/release/libpdf_inspector_c.a -ldl -lpthread -lm -o /tmp/c-consumer-asan
+          cd c-api
+          ASAN_OPTIONS=detect_leaks=1 /tmp/c-consumer-asan
+
+      - name: Test C ABI
+        # `--release` reuses the artifacts the C consumer step just built;
+        # a debug run would recompile the whole dependency graph.
+        run: cargo test --manifest-path c-api/Cargo.toml --release --lib
+
+      - name: Clippy C API
+        run: cargo clippy --manifest-path c-api/Cargo.toml -- -D warnings
+
+      - name: Check optional C features
+        run: |
+          cargo clippy --manifest-path c-api/Cargo.toml --features render-pdfium -- -D warnings
+          cargo clippy --manifest-path c-api/Cargo.toml --features ocr -- -D warnings
+          cargo test --manifest-path c-api/Cargo.toml --features ocr --lib
+
   fmt:
     name: Format
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -58,7 +121,9 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path c-api/Cargo.toml -- --check
 
       - name: Check WASM formatting
         run: cargo fmt --manifest-path wasm/Cargo.toml -- --check
@@ -269,6 +334,12 @@ jobs:
 
           wait "$node_build_pid"
           python -m pip install "$RUNNER_TEMP"/python-wheels/*.whl
+
+      - name: Exercise C ABI with native rendering and OCR
+        shell: bash
+        run: |
+          export PDF_INSPECTOR_OCR_TEST_MODELS="$PDF_INSPECTOR_MODEL_CACHE/pp-ocrv6-small/oar-ocr-v0.7.0"
+          cargo test --manifest-path c-api/Cargo.toml --features ocr --lib -- --nocapture
 
       - name: Run Node OCR binding
         shell: bash

@@ -844,7 +844,10 @@ fn is_parallel_prose_table(table: &crate::tables::Table) -> bool {
 #[derive(Clone, Copy)]
 enum TableOutputMode {
     Markdown,
-    #[cfg(feature = "ocr")]
+    /// Collect every accepted data table (TOCs excluded) instead of
+    /// rendering Markdown.
+    DataTables,
+    #[cfg(feature = "vision")]
     CompleteTables,
 }
 
@@ -853,7 +856,6 @@ struct TableDetectionOutput {
     pages_with_detected_tables: HashSet<u32>,
     pages_with_tables: HashSet<u32>,
     markdown_by_page: HashMap<u32, Vec<PositionedMarkdown>>,
-    #[cfg(feature = "ocr")]
     complete_tables: Vec<(u32, crate::tables::Table)>,
 }
 
@@ -864,7 +866,6 @@ impl TableDetectionOutput {
             pages_with_detected_tables: HashSet::new(),
             pages_with_tables: HashSet::new(),
             markdown_by_page: HashMap::new(),
-            #[cfg(feature = "ocr")]
             complete_tables: Vec::new(),
         }
     }
@@ -889,7 +890,13 @@ impl TableDetectionOutput {
                         chart_order,
                     ));
             }
-            #[cfg(feature = "ocr")]
+            TableOutputMode::DataTables => {
+                if table.kind == crate::tables::TableKind::Data {
+                    self.pages_with_tables.insert(page);
+                    self.complete_tables.push((page, table.clone()));
+                }
+            }
+            #[cfg(feature = "vision")]
             TableOutputMode::CompleteTables => {
                 if crate::tables::is_complete_data_table(table) {
                     self.pages_with_tables.insert(page);
@@ -911,7 +918,6 @@ impl TableDetectionOutput {
 #[derive(Default)]
 struct MarkdownConversionOutput {
     markdown: String,
-    #[cfg(feature = "ocr")]
     detected_tables: Vec<(u32, crate::tables::Table)>,
 }
 
@@ -1432,29 +1438,29 @@ pub fn to_markdown_from_items_with_rects_and_page_count(
     )
 }
 
-pub(crate) struct MarkdownDocumentContext<'a> {
-    pub(crate) page_thresholds: &'a HashMap<u32, f32>,
-    pub(crate) struct_roles:
-        Option<&'a HashMap<u32, HashMap<i64, crate::structure_tree::StructRole>>>,
-    pub(crate) struct_tables: &'a [crate::structure_tree::StructTable],
-    pub(crate) page_count: u32,
+/// Document-level evidence supplied to positioned-item Markdown conversion.
+pub struct MarkdownDocumentContext<'a> {
+    pub page_thresholds: &'a HashMap<u32, f32>,
+    pub struct_roles: Option<&'a HashMap<u32, HashMap<i64, crate::structure_tree::StructRole>>>,
+    pub struct_tables: &'a [crate::structure_tree::StructTable],
+    pub page_count: u32,
     /// Pages where an upstream document-level pass removed folios. This keeps
     /// table-continuation classification consistent after masked items drop.
-    pub(crate) prefiltered_page_number_pages: Option<&'a HashSet<u32>>,
+    pub prefiltered_page_number_pages: Option<&'a HashSet<u32>>,
     /// Document-level removal decisions aligned with this call's input items.
     /// Table detection consumes the original items; the mask is applied only
     /// after table claims have been established.
-    pub(crate) prefiltered_page_number_mask: Option<&'a [bool]>,
+    pub prefiltered_page_number_mask: Option<&'a [bool]>,
     /// Optional chart masks shared with layout analysis so the geometry is
     /// detected once and interpreted identically by both pipelines.
-    pub(crate) precomputed_chart_regions: Option<&'a PageChartRegions>,
+    pub precomputed_chart_regions: Option<&'a PageChartRegions>,
 }
 
 /// Convert positioned text items to markdown, using rectangles and line segments for table detection.
 ///
 /// Line-based detection runs first (strongest structural evidence), then rect-based,
 /// then heuristic fallback on unclaimed items.
-pub(crate) fn to_markdown_from_items_with_rects_and_lines(
+pub fn to_markdown_from_items_with_rects_and_lines(
     items: Vec<TextItem>,
     options: MarkdownOptions,
     rects: &[crate::types::PdfRect],
@@ -1472,10 +1478,31 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     .markdown
 }
 
+/// Run the ordinary Markdown table pipeline and return the accepted data
+/// tables (TOCs excluded) instead of Markdown. Detector row/column positions
+/// are not a cell-box contract; the cell matrices are the extraction evidence.
+pub fn detect_data_tables_from_items(
+    items: Vec<TextItem>,
+    options: MarkdownOptions,
+    rects: &[crate::types::PdfRect],
+    pdf_lines: &[crate::types::PdfLine],
+    context: MarkdownDocumentContext<'_>,
+) -> Vec<(u32, crate::tables::Table)> {
+    convert_items_with_rects_lines_and_table_output(
+        items,
+        options,
+        rects,
+        pdf_lines,
+        context,
+        TableOutputMode::DataTables,
+    )
+    .detected_tables
+}
+
 /// Run the ordinary Markdown table pipeline but return only structurally
 /// complete data tables. Supplemental OCR uses this to keep detector behavior
 /// identical without parsing the serialized Markdown back into tables.
-#[cfg(feature = "ocr")]
+#[cfg(feature = "vision")]
 pub(crate) fn complete_table_markdown_from_items(
     items: Vec<TextItem>,
     options: MarkdownOptions,
@@ -2132,9 +2159,7 @@ fn convert_items_with_rects_lines_and_table_output(
         }
     }
 
-    #[cfg(feature = "ocr")]
     let mut detected_tables = table_output.complete_tables;
-    #[cfg(feature = "ocr")]
     detected_tables.sort_by_key(|(page, _)| *page);
     let mut page_tables = table_output.markdown_by_page;
 
@@ -2406,7 +2431,6 @@ fn convert_items_with_rects_lines_and_table_output(
     );
     MarkdownConversionOutput {
         markdown,
-        #[cfg(feature = "ocr")]
         detected_tables,
     }
 }
@@ -2417,7 +2441,7 @@ mod tests {
     use analysis::detect_header_level;
     use classify::{is_code_like, is_list_item};
 
-    #[cfg(feature = "ocr")]
+    #[cfg(feature = "vision")]
     #[test]
     fn complete_table_output_marks_only_pages_with_emitted_tables() {
         let mut output = TableDetectionOutput::new(TableOutputMode::CompleteTables);
