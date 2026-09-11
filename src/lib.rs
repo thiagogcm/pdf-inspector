@@ -483,6 +483,26 @@ pub fn extract_pages_markdown_mem(
     .map(|extraction| extraction.result)
 }
 
+/// [`extract_pages_markdown_mem`] with a password and Markdown options.
+///
+/// Repeated header/footer stripping follows `options.strip_headers_footers`.
+pub fn extract_pages_markdown_mem_with_options(
+    buffer: &[u8],
+    pages: Option<&[u32]>,
+    password: Option<&str>,
+    options: &MarkdownOptions,
+) -> Result<PagesExtractionResult, PdfError> {
+    extract_pages_markdown_mem_impl(
+        buffer,
+        pages,
+        password,
+        options,
+        options.strip_headers_footers,
+        false,
+    )
+    .map(|extraction| extraction.result)
+}
+
 #[cfg(all(feature = "ocr", not(target_arch = "wasm32")))]
 pub(crate) fn extract_pages_markdown_mem_for_ocr(
     buffer: &[u8],
@@ -4018,7 +4038,7 @@ pub(crate) fn load_document_from_mem(buffer: &[u8]) -> Result<(Document, u32), P
 }
 
 /// Load a PDF from a memory buffer, decrypting with `password` if encrypted.
-pub(crate) fn load_document_from_mem_with_password(
+pub fn load_document_from_mem_with_password(
     buffer: &[u8],
     password: Option<&str>,
 ) -> Result<(Document, u32), PdfError> {

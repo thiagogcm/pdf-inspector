@@ -97,6 +97,7 @@ pub struct FusedPages {
 
 /// Origin of a trustworthy native-text candidate retained for adaptive OCR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
 pub(crate) enum NativeCandidateOrigin {
     /// Text produced by pdf-inspector's normal native extractor.
     Extractor,
@@ -134,12 +135,14 @@ pub(crate) enum OcrFusionRoute {
     FullPage,
     /// The native page is clean; only tables detected inside these image
     /// regions may be appended.
+    #[cfg_attr(not(any(test, feature = "ocr")), allow(dead_code))]
     SupplementalRegions(Vec<PdfRect>),
 }
 
 impl NativeFallbackCandidate {
     /// True when an independent native recovery is substantial enough to
     /// cancel OCR for recoverable font/vector routing reasons.
+    #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
     pub(crate) fn is_complete_recovery(&self) -> bool {
         self.quality.alphanumeric_chars >= 40 && self.quality.score >= 0.68
     }
@@ -148,6 +151,7 @@ impl NativeFallbackCandidate {
         &self.markdown
     }
 
+    #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
     pub(crate) fn is_stronger_than(&self, other: &Self) -> bool {
         self.quality.alphanumeric_chars > other.quality.alphanumeric_chars
             || (self.quality.alphanumeric_chars == other.quality.alphanumeric_chars
@@ -160,6 +164,7 @@ impl NativeFallbackCandidate {
 /// This intentionally uses script-agnostic evidence. A native candidate only
 /// needs to be trustworthy, not necessarily complete: a clean native header
 /// can still be fused with an image-backed OCR body.
+#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
 pub(crate) fn assess_native_candidate(
     markdown: String,
     origin: NativeCandidateOrigin,
@@ -246,6 +251,7 @@ fn full_page_routes(ocr_run: &OcrRun) -> BTreeMap<u32, OcrFusionRoute> {
 }
 
 /// OCR-pipeline fusion with an explicit route mode for every processed page.
+#[cfg_attr(not(any(test, feature = "ocr")), allow(dead_code))]
 pub(crate) fn fuse_ocr_pages_adaptive_with_routes(
     native_pages: &[PageMarkdown],
     ocr_run: &OcrRun,
