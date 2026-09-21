@@ -4,8 +4,12 @@
 #include <string.h>
 
 _Static_assert(sizeof(((PdfRequest *)0)->outputs) == 4, "flags have a fixed width");
+_Static_assert(sizeof(((PdfRequest *)0)->include_invisible) == 4, "include_invisible has a fixed width");
 _Static_assert(sizeof(((PdfDiagnostic *)0)->status) == 4, "status has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->mcid) == 8, "MCID has a fixed width");
+_Static_assert(sizeof(((PdfItem *)0)->dest_page) == 4, "dest_page has a fixed width");
+_Static_assert(sizeof(((PdfLoadAudit *)0)->flags) == 4, "audit flags have a fixed width");
+_Static_assert(sizeof(((PdfPageQuality *)0)->score) == 4, "quality score has a fixed width");
 
 static PdfBytes bytes(const char *s) {
     PdfBytes result = {(const uint8_t *)s, strlen(s)};
@@ -47,6 +51,8 @@ int main(void) {
     CHECK((view->present & PDF_ANALYSIS) && view->structure_nodes.len > 0);
     CHECK(view->structure_nodes.ptr[0].id == 1 && view->structure_nodes.ptr[0].parent == 0);
     CHECK(page->items.ptr[0].bounds.y1 >= page->items.ptr[0].bounds.y0);
+    CHECK(page->quality.visible_chars >= page->quality.alphanumeric_chars);
+    CHECK(view->audit.leading_bytes == 0);
 
     request.markdown.flags &= ~PDF_MD_HEADERS;
     CHECK(pdf_inspector_execute(document, &request, &second, &error) == PDF_OK);
