@@ -1,40 +1,77 @@
 use super::*;
 use pdf_inspector::extractor::PageFrameInfo;
-use pdf_inspector::{BoldSource, PositionFrame, TextItem, TextQualityMetrics};
-use std::any::Any;
+use pdf_inspector::{BoldSource, PageRotation, PositionFrame, TextItem, TextQualityMetrics};
 
+/// Memory behind one published record graph, freed together. Small strings
+/// and record arrays live in the arena; large owned buffers are kept as is.
 #[derive(Default)]
 pub(super) struct Storage {
-    allocations: Vec<Box<dyn Any>>,
+    arena: bumpalo::Bump,
+    owned: std::cell::RefCell<Vec<Vec<u8>>>,
+}
+/// A published `{ ptr, len }` record over `Item`s.
+pub(super) trait CSlice {
+    type Item: Copy;
+    fn from_raw(ptr: *const Self::Item, len: usize) -> Self;
+}
+macro_rules! c_slices {
+    ($($t:ident => $item:ty;)*) => {$(
+        impl CSlice for $t {
+            type Item = $item;
+            fn from_raw(ptr: *const $item, len: usize) -> Self {
+                Self { ptr, len }
+            }
+        }
+    )*};
+}
+c_slices! {
+    PdfStrings => PdfBytes;
+    PdfBoxes => PdfBox;
+    PdfIntervals => PdfInterval;
+    PdfFloats => f32;
+    PdfItems => PdfItem;
+    PdfPageInfos => PdfPageInfo;
+    PdfStructureElements => PdfStructureElement;
+    PdfRectangles => PdfRectangle;
+    PdfSegments => PdfSegment;
+    PdfPages => PdfPage;
+    PdfRegions => PdfRegion;
+    PdfTables => PdfTable;
+    PdfCells => PdfCell;
+    PdfStructureNodes => PdfStructureNode;
+    PdfContentReferences => PdfContentReference;
 }
 impl Storage {
-    fn keep<T: 'static>(&mut self, values: Vec<T>) -> (*const T, usize) {
-        let values = values.into_boxed_slice();
-        let pair = (values.as_ptr(), values.len());
-        self.allocations.push(Box::new(values));
-        pair
+    pub(super) fn bytes(&self, bytes: impl AsRef<[u8]>) -> PdfBytes {
+        let copy = self.arena.alloc_slice_copy(bytes.as_ref());
+        PdfBytes {
+            ptr: copy.as_ptr(),
+            len: copy.len(),
+        }
     }
-    pub(super) fn bytes(&mut self, bytes: impl Into<Vec<u8>>) -> PdfBytes {
-        let (ptr, len) = self.keep(bytes.into());
-        PdfBytes { ptr, len }
+    /// Keep a large buffer without copying it.
+    pub(super) fn owned(&self, bytes: Vec<u8>) -> PdfBytes {
+        let view = PdfBytes {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+        };
+        self.owned.borrow_mut().push(bytes);
+        view
     }
-    pub(super) fn optional(&mut self, text: Option<&str>) -> PdfBytes {
-        text.map_or(PdfBytes::default(), |text| self.bytes(text.as_bytes()))
+    pub(super) fn optional(&self, text: Option<&str>) -> PdfBytes {
+        text.map_or(PdfBytes::default(), |text| self.bytes(text))
     }
-    pub(super) fn strings(
-        &mut self,
-        text: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> PdfStrings {
-        let strings = text
-            .into_iter()
-            .map(|s| self.bytes(s.as_ref().as_bytes()))
-            .collect();
-        let (ptr, len) = self.keep(strings);
-        PdfStrings { ptr, len }
+    /// Collect straight into the arena; the iterator may allocate here too.
+    pub(super) fn slice<S: CSlice>(&self, values: impl IntoIterator<Item = S::Item>) -> S {
+        let copy = bumpalo::collections::Vec::from_iter_in(values, &self.arena).into_bump_slice();
+        S::from_raw(copy.as_ptr(), copy.len())
+    }
+    pub(super) fn strings(&self, text: impl IntoIterator<Item = impl AsRef<str>>) -> PdfStrings {
+        self.slice(text.into_iter().map(|s| self.bytes(s.as_ref())))
     }
     /// Items arrive y-up lower-left in the request frame from core; present
     /// y-down top-left with clockwise rotation (presentation only, no math).
-    pub(super) fn item(&mut self, item: &TextItem, frame_height: f32) -> PdfItem {
+    pub(super) fn item(&self, item: &TextItem, frame_height: f32) -> PdfItem {
         let flags = (u32::from(item.is_bold) * PDF_BOLD)
             | (u32::from(item.is_italic) * PDF_ITALIC)
             | (u32::from(item.is_underline) * PDF_UNDERLINE)
@@ -64,9 +101,9 @@ impl Storage {
                 Some(true) => PDF_PITCH_FIXED,
                 Some(false) => PDF_PITCH_PROPORTIONAL,
             },
-            text: self.bytes(item.text.as_bytes()),
-            font: self.bytes(item.font.as_bytes()),
-            font_tag: self.bytes(item.font_tag.as_bytes()),
+            text: self.bytes(&item.text),
+            font: self.bytes(&item.font),
+            font_tag: self.bytes(&item.font_tag),
             dest_page: 0,
             link: self.optional(link),
         }
@@ -157,67 +194,25 @@ impl PdfTransform {
     }
 }
 
-impl Storage {
-    pub(super) fn boxes(&mut self, v: Vec<PdfBox>) -> PdfBoxes {
-        let (ptr, len) = self.keep(v);
-        PdfBoxes { ptr, len }
-    }
-    pub(super) fn intervals(&mut self, v: Vec<PdfInterval>) -> PdfIntervals {
-        let (ptr, len) = self.keep(v);
-        PdfIntervals { ptr, len }
-    }
-    pub(super) fn floats(&mut self, v: Vec<f32>) -> PdfFloats {
-        let (ptr, len) = self.keep(v);
-        PdfFloats { ptr, len }
-    }
-    pub(super) fn items(&mut self, v: Vec<PdfItem>) -> PdfItems {
-        let (ptr, len) = self.keep(v);
-        PdfItems { ptr, len }
-    }
-    pub(super) fn structure_elements(
-        &mut self,
-        v: Vec<PdfStructureElement>,
-    ) -> PdfStructureElements {
-        let (ptr, len) = self.keep(v);
-        PdfStructureElements { ptr, len }
-    }
-    pub(super) fn rectangles(&mut self, v: Vec<PdfRectangle>) -> PdfRectangles {
-        let (ptr, len) = self.keep(v);
-        PdfRectangles { ptr, len }
-    }
-    pub(super) fn segments(&mut self, v: Vec<PdfSegment>) -> PdfSegments {
-        let (ptr, len) = self.keep(v);
-        PdfSegments { ptr, len }
-    }
-    pub(super) fn pages(&mut self, v: Vec<PdfPage>) -> PdfPages {
-        let (ptr, len) = self.keep(v);
-        PdfPages { ptr, len }
-    }
-    pub(super) fn regions(&mut self, v: Vec<PdfRegion>) -> PdfRegions {
-        let (ptr, len) = self.keep(v);
-        PdfRegions { ptr, len }
-    }
-    pub(super) fn tables(&mut self, v: Vec<PdfTable>) -> PdfTables {
-        let (ptr, len) = self.keep(v);
-        PdfTables { ptr, len }
-    }
-    pub(super) fn cells(&mut self, v: Vec<PdfCell>) -> PdfCells {
-        let (ptr, len) = self.keep(v);
-        PdfCells { ptr, len }
-    }
-    pub(super) fn structure_nodes(&mut self, v: Vec<PdfStructureNode>) -> PdfStructureNodes {
-        let (ptr, len) = self.keep(v);
-        PdfStructureNodes { ptr, len }
-    }
-    pub(super) fn content_references(
-        &mut self,
-        v: Vec<PdfContentReference>,
-    ) -> PdfContentReferences {
-        let (ptr, len) = self.keep(v);
-        PdfContentReferences { ptr, len }
+/// Core `usize` counts and indices as C `uint32_t`, saturating.
+pub(super) fn narrow(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+pub(super) fn orientation(rotation: PageRotation) -> u32 {
+    match rotation {
+        PageRotation::Upright => PDF_ORIENTATION_UPRIGHT,
+        PageRotation::Ccw => PDF_ORIENTATION_CCW,
+        PageRotation::Cw => PDF_ORIENTATION_CW,
     }
 }
-
+pub(super) fn sheet_page_info(frame: &PageFrameInfo) -> PdfPageInfo {
+    PdfPageInfo {
+        page: frame.page,
+        width: frame.sheet_width,
+        height: frame.sheet_height,
+        rotation: frame.rotation_degrees,
+    }
+}
 pub(super) fn quality_view(metrics: TextQualityMetrics) -> PdfPageQuality {
     PdfPageQuality {
         alphanumeric_chars: metrics.alphanumeric_chars,

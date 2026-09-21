@@ -21,7 +21,7 @@ pub(super) fn renderer() -> Fallible<&'static pdf_inspector::vision::PdfiumRende
     Ok(RENDERER.get_or_init(|| loaded))
 }
 
-pub(super) unsafe fn prepare(options: &PdfRuntimeOptions) -> Fallible<PdfResult> {
+pub(super) unsafe fn prepare(options: &PdfRuntimeOptions) -> Fallible<PdfRuntimeInfo> {
     if options.capabilities == 0 || options.capabilities & !(PDF_CAP_RENDER | PDF_CAP_OCR) != 0 {
         return Err(Failure::invalid(
             "request rendering and/or OCR capabilities",
@@ -45,9 +45,9 @@ pub(super) unsafe fn prepare(options: &PdfRuntimeOptions) -> Fallible<PdfResult>
             "requested native runtime was not compiled in",
         ));
     }
-    let mut storage = Storage::default();
+    #[cfg_attr(not(feature = "ocr"), allow(unused_mut))]
     let mut info = PdfRuntimeInfo {
-        ready: requested,
+        capabilities: requested,
         ..PdfRuntimeInfo::default()
     };
     // Check PDFium before any model acquisition, just as the processing path does.
@@ -66,17 +66,8 @@ pub(super) unsafe fn prepare(options: &PdfRuntimeOptions) -> Fallible<PdfResult>
             ..OcrOptions::default()
         };
         pdf_inspector::vision::cached_ocr_engine(&options).map_err(Failure::runtime)?;
-        info.model = storage.bytes(PP_OCR_V6_SMALL.id.as_bytes());
-        info.model_revision = storage.bytes(PP_OCR_V6_SMALL.revision.as_bytes());
+        info.model = PdfBytes::from_static(PP_OCR_V6_SMALL.id);
+        info.model_revision = PdfBytes::from_static(PP_OCR_V6_SMALL.revision);
     }
-    // Keep feature-minimal builds warning-free without changing the report layout.
-    let _ = (&mut storage, &mut info);
-    Ok(PdfResult {
-        view: PdfResultView {
-            present: PDF_RUNTIME,
-            runtime: info,
-            ..PdfResultView::default()
-        },
-        _storage: storage,
-    })
+    Ok(info)
 }

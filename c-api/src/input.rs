@@ -9,6 +9,26 @@ pub(super) unsafe fn required<'a, T>(ptr: *const T, name: &str) -> Fallible<&'a 
     }
     Ok(&*ptr)
 }
+/// NULL selects `default`; otherwise the pointee is validated and copied.
+pub(super) unsafe fn or_default<T: Copy>(
+    ptr: *const T,
+    name: &str,
+    default: impl FnOnce() -> T,
+) -> Fallible<T> {
+    if ptr.is_null() {
+        Ok(default())
+    } else {
+        required(ptr, name).copied()
+    }
+}
+/// Reject bits outside `allowed`.
+pub(super) fn reserved(value: u32, allowed: u32, what: &str) -> Fallible<()> {
+    if value & !allowed != 0 {
+        Err(Failure::invalid(format!("unknown {what}")))
+    } else {
+        Ok(())
+    }
+}
 pub(super) unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> Fallible<&'a [T]> {
     if len == 0 {
         return Ok(&[]);
@@ -112,10 +132,21 @@ pub(super) fn default_markdown() -> PdfMarkdownOptions {
         base_font_size: 0.0,
     }
 }
+const ALL_MD_FLAGS: u32 = PDF_MD_HEADERS
+    | PDF_MD_LISTS
+    | PDF_MD_CODE
+    | PDF_MD_REMOVE_PAGE_NUMBERS
+    | PDF_MD_URLS
+    | PDF_MD_HYPHENATION
+    | PDF_MD_BOLD
+    | PDF_MD_ITALIC
+    | PDF_MD_UNDERLINE
+    | PDF_MD_IMAGES
+    | PDF_MD_LINKS
+    | PDF_MD_PAGE_NUMBERS
+    | PDF_MD_STRIP_FURNITURE;
 pub(super) fn markdown(m: &PdfMarkdownOptions) -> Fallible<MarkdownOptions> {
-    if m.flags & !8191 != 0 {
-        return Err(Failure::invalid("unknown Markdown flags"));
-    }
+    reserved(m.flags, ALL_MD_FLAGS, "Markdown flags")?;
     finite(m.base_font_size, "base font size")?;
     if m.base_font_size < 0.0 {
         return Err(Failure::invalid("base font size must be nonnegative"));
@@ -147,7 +178,7 @@ pub(super) fn default_request() -> PdfRequest {
     let o = pdf_inspector::vision::OcrOptions::default();
     let d = pdf_inspector::DetectionConfig::default();
     PdfRequest {
-        outputs: PDF_INSPECTION | PDF_MARKDOWN,
+        outputs: PDF_OUT_INSPECTION | PDF_OUT_MARKDOWN,
         markdown: default_markdown(),
         detection: PdfDetectionOptions {
             strategy: PDF_SCAN_SAMPLE,
@@ -159,8 +190,8 @@ pub(super) fn default_request() -> PdfRequest {
         render: PdfRenderOptions {
             dpi: r.dpi,
             format: PDF_RGB8,
-            annotations: u32::from(r.annotations),
-            form_fields: u32::from(r.form_fields),
+            flags: (u32::from(r.annotations) * PDF_RENDER_ANNOTATIONS)
+                | (u32::from(r.form_fields) * PDF_RENDER_FORM_FIELDS),
             max_page_bytes: r.max_output_bytes_per_page,
         },
         ocr: PdfOcrOptions {
@@ -175,10 +206,18 @@ pub(super) fn default_request() -> PdfRequest {
     }
 }
 pub(super) fn render(r: &PdfRenderOptions) -> Fallible<RenderOptions> {
-    finite(r.dpi, "DPI")?;
-    if r.dpi <= 0.0 || r.annotations > 1 || r.form_fields > 1 || r.max_page_bytes == 0 {
-        return Err(Failure::invalid("invalid rendering options"));
+    finite(r.dpi, "render DPI")?;
+    if r.dpi <= 0.0 {
+        return Err(Failure::invalid("render DPI must be positive"));
     }
+    if r.max_page_bytes == 0 {
+        return Err(Failure::invalid("render max_page_bytes must be positive"));
+    }
+    reserved(
+        r.flags,
+        PDF_RENDER_ANNOTATIONS | PDF_RENDER_FORM_FIELDS,
+        "rendering flags",
+    )?;
     let pixel_format = match r.format {
         PDF_RGB8 => RenderPixelFormat::Rgb8,
         PDF_RGBA8 => RenderPixelFormat::Rgba8,
@@ -188,8 +227,8 @@ pub(super) fn render(r: &PdfRenderOptions) -> Fallible<RenderOptions> {
     Ok(RenderOptions {
         dpi: r.dpi,
         pixel_format,
-        annotations: r.annotations != 0,
-        form_fields: r.form_fields != 0,
+        annotations: r.flags & PDF_RENDER_ANNOTATIONS != 0,
+        form_fields: r.flags & PDF_RENDER_FORM_FIELDS != 0,
         max_output_bytes_per_page: r.max_page_bytes,
     })
 }
@@ -207,12 +246,11 @@ pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
         PDF_FRAME_DISPLAY => PositionFrame::Display,
         _ => return Err(Failure::invalid("unknown coordinate frame")),
     };
-    if r.bold_from_weight > 1 {
-        return Err(Failure::invalid("unknown bold_from_weight"));
-    }
-    if r.include_invisible > 1 {
-        return Err(Failure::invalid("unknown include_invisible"));
-    }
+    reserved(
+        r.flags,
+        PDF_REQUEST_BOLD_FROM_WEIGHT | PDF_REQUEST_INCLUDE_INVISIBLE,
+        "request flags",
+    )?;
     if !(100..=900).contains(&r.bold_weight_threshold) {
         return Err(Failure::invalid(
             "bold weight threshold is outside 100..900",
@@ -220,7 +258,7 @@ pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
     }
     Ok(PositionOptions::new()
         .frame(frame)
-        .bold_from_weight(r.bold_from_weight != 0)
+        .bold_from_weight(r.flags & PDF_REQUEST_BOLD_FROM_WEIGHT != 0)
         .bold_weight_threshold(r.bold_weight_threshold as u16)
-        .include_invisible(r.include_invisible != 0))
+        .include_invisible(r.flags & PDF_REQUEST_INCLUDE_INVISIBLE != 0))
 }

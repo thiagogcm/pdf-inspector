@@ -4,9 +4,10 @@
 //! Every non-NULL input pointer must be aligned and reference live memory of
 //! the declared type and length. Inputs must not be mutated during a call.
 //! Output slots must be writable and must not alias inputs or each other.
-//! Handles must come from this library and be freed exactly once. Free must
-//! not race with any use of that handle or its views. NULL free is a no-op.
-//! Calls are synchronous. Borrowed request memory is never retained.
+//! Published pointers come from this library and are freed exactly once with
+//! their matching function; free must not race with any use of that record
+//! or the document info. NULL free is a no-op. Calls are synchronous.
+//! Borrowed request memory is never retained.
 #![allow(clippy::missing_safety_doc)]
 
 mod execute;
@@ -32,15 +33,61 @@ use output::Storage;
 pub struct PdfDocument {
     state: DocumentState,
 }
-/// Owns a result and all memory reachable through its view.
-pub struct PdfResult {
-    view: PdfResultView,
-    _storage: Storage,
+/// Backs a published `PdfResult`: the record sits first so the pointer C
+/// holds is also the allocation.
+#[repr(C)]
+struct ResultOwner {
+    result: PdfResult,
+    storage: Storage,
 }
-/// Owns the diagnostic for a single failed call.
-pub struct PdfErrorHandle {
-    view: PdfDiagnostic,
-    _message: Box<[u8]>,
+#[repr(C)]
+struct ErrorOwner {
+    error: PdfError,
+    storage: Storage,
+}
+
+/// A boxed owner whose `Public` record is what C receives.
+///
+/// # Safety
+/// `Public` is `Self`, or the field at offset 0 of `#[repr(C)] Self`, so the
+/// pointer C holds is also the allocation.
+unsafe trait Owner: Sized {
+    type Public;
+    fn publish(self) -> *mut Self::Public {
+        Box::into_raw(Box::new(self)).cast()
+    }
+    unsafe fn release(public: *mut Self::Public) {
+        drop(Box::from_raw(public.cast::<Self>()));
+    }
+}
+/// Implement `Owner` for a record-first owner, checking the offset.
+macro_rules! owner {
+    ($owner:ident . $field:ident : $public:ty) => {
+        const _: () = assert!(std::mem::offset_of!($owner, $field) == 0);
+        unsafe impl Owner for $owner {
+            type Public = $public;
+        }
+    };
+}
+owner!(ResultOwner.result: PdfResult);
+owner!(ErrorOwner.error: PdfError);
+unsafe impl Owner for PdfDocument {
+    type Public = PdfDocument;
+}
+impl ResultOwner {
+    fn new(result: PdfResult, storage: Storage) -> Self {
+        Self { result, storage }
+    }
+}
+impl ErrorOwner {
+    fn new(failure: Failure) -> Self {
+        let storage = Storage::default();
+        let error = PdfError {
+            status: failure.status,
+            message: storage.bytes(&failure.message),
+        };
+        Self { error, storage }
+    }
 }
 
 #[derive(Debug)]
@@ -62,7 +109,12 @@ impl Failure {
             message: message.into(),
         }
     }
-    #[cfg(feature = "render-pdfium")]
+    fn parse(message: impl Into<String>) -> Self {
+        Self {
+            status: PDF_PARSE_ERROR,
+            message: message.into(),
+        }
+    }
     fn runtime(error: impl std::fmt::Display) -> Self {
         Self {
             status: PDF_RUNTIME_ERROR,
@@ -92,55 +144,79 @@ impl From<std::io::Error> for Failure {
     }
 }
 
-unsafe fn publish<T>(
-    out: *mut *mut T,
-    error: *mut *mut PdfErrorHandle,
+/// Publish a failure to `error` (when non-NULL) and return its status.
+unsafe fn fail(error: *mut *mut PdfError, failure: Failure) -> i32 {
+    let status = failure.status;
+    if !error.is_null() {
+        error.write(ErrorOwner::new(failure).publish());
+    }
+    status
+}
+/// Write `f`'s value to `out`, which is cleared to `empty` before validation.
+/// Panics are caught and reported as `PDF_PANIC`.
+unsafe fn publish_value<T>(
+    out: *mut T,
+    empty: T,
+    error: *mut *mut PdfError,
     f: impl FnOnce() -> Fallible<T>,
 ) -> i32 {
     if !error.is_null() {
         error.write(ptr::null_mut());
     }
-    if !out.is_null() {
-        out.write(ptr::null_mut());
-    }
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        if out.is_null() {
-            return Err(Failure::invalid("output slot is NULL"));
-        }
-        f()
-    }));
-    match result {
+    let Some(slot) = out.as_mut() else {
+        return fail(error, Failure::invalid("output slot is NULL"));
+    };
+    *slot = empty;
+    match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(value)) => {
-            out.write(Box::into_raw(Box::new(value)));
+            *slot = value;
             PDF_OK
         }
-        failure => {
-            let failure = match failure {
-                Ok(Err(e)) => e,
-                _ => Failure {
-                    status: PDF_PANIC,
-                    message: "processing panicked".into(),
-                },
-            };
-            if !error.is_null() {
-                let bytes = failure.message.into_bytes().into_boxed_slice();
-                let view = PdfDiagnostic {
-                    status: failure.status,
-                    message: PdfBytes {
-                        ptr: bytes.as_ptr(),
-                        len: bytes.len(),
-                    },
-                };
-                error.write(Box::into_raw(Box::new(PdfErrorHandle {
-                    view,
-                    _message: bytes,
-                })));
-            }
-            failure.status
-        }
+        Ok(Err(failure)) => fail(error, failure),
+        Err(_) => fail(
+            error,
+            Failure {
+                status: PDF_PANIC,
+                message: "processing panicked".into(),
+            },
+        ),
     }
 }
+/// Publish an owner's pointer to `out`.
+unsafe fn publish<O: Owner>(
+    out: *mut *mut O::Public,
+    error: *mut *mut PdfError,
+    f: impl FnOnce() -> Fallible<O>,
+) -> i32 {
+    publish_value(out, ptr::null_mut(), error, || f().map(Owner::publish))
+}
+unsafe fn release<O: Owner>(public: *mut O::Public) {
+    if !public.is_null() {
+        let _ = catch_unwind(AssertUnwindSafe(|| O::release(public)));
+    }
+}
+unsafe fn init<T>(out: *mut T, value: T) -> i32 {
+    if out.is_null() {
+        return PDF_INVALID_ARGUMENT;
+    }
+    out.write(value);
+    PDF_OK
+}
+unsafe fn markdown_options(
+    options: *const PdfMarkdownOptions,
+) -> Fallible<pdf_inspector::MarkdownOptions> {
+    input::markdown(&input::or_default(
+        options,
+        "Markdown options",
+        input::default_markdown,
+    )?)
+}
 
+/// Library version as static UTF-8.
+#[no_mangle]
+pub extern "C" fn pdf_inspector_version() -> PdfBytes {
+    PdfBytes::from_static(env!("CARGO_PKG_VERSION"))
+}
 /// Compiled capabilities. Does not load libraries, inspect models, or use the network.
 #[no_mangle]
 pub extern "C" fn pdf_inspector_capabilities() -> u32 {
@@ -164,68 +240,41 @@ pub extern "C" fn pdf_inspector_capabilities() -> u32 {
 /// Initialize options. Returns PDF_INVALID_ARGUMENT for NULL.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_runtime_options_init(out: *mut PdfRuntimeOptions) -> i32 {
-    if out.is_null() {
-        return PDF_INVALID_ARGUMENT;
-    }
-    out.write(runtime::defaults());
-    PDF_OK
+    init(out, runtime::defaults())
 }
-/// Verify native runtime readiness without a document, initializing reusable OCR sessions.
-/// NULL options request rendering and OCR, offline. Downloads require explicit opt-in.
-/// Returns a runtime result or an owned diagnostic; use the ordinary result/error functions.
+/// Verify native runtime readiness without a document, initializing reusable
+/// OCR sessions. NULL options request rendering and OCR, offline. `out` is
+/// zeroed first and written only on success.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_prepare_runtime(
     options: *const PdfRuntimeOptions,
-    out: *mut *mut PdfResult,
-    error: *mut *mut PdfErrorHandle,
+    out: *mut PdfRuntimeInfo,
+    error: *mut *mut PdfError,
 ) -> i32 {
-    publish(out, error, || {
-        let options = if options.is_null() {
-            runtime::defaults()
-        } else {
-            *input::required(options, "runtime options")?
-        };
-        runtime::prepare(&options)
+    publish_value(out, PdfRuntimeInfo::default(), error, || {
+        runtime::prepare(&input::or_default(
+            options,
+            "runtime options",
+            runtime::defaults,
+        )?)
     })
-}
-/// Initialize options. Returns PDF_INVALID_ARGUMENT for NULL.
-#[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_open_options_init(out: *mut PdfOpenOptions) -> i32 {
-    if out.is_null() {
-        return PDF_INVALID_ARGUMENT;
-    }
-    out.write(PdfOpenOptions::default());
-    PDF_OK
 }
 /// Initialize a request to all pages, inspection and Markdown, with OCR off.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_request_init(out: *mut PdfRequest) -> i32 {
-    if out.is_null() {
-        return PDF_INVALID_ARGUMENT;
-    }
-    out.write(input::default_request());
-    PDF_OK
+    init(out, input::default_request())
 }
-/// Initialize composition options for plain UTF-8 text.
+/// Initialize Markdown options to the core defaults.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_compose_init(out: *mut PdfComposeInput) -> i32 {
-    if out.is_null() {
-        return PDF_INVALID_ARGUMENT;
-    }
-    out.write(PdfComposeInput {
-        markdown: input::default_markdown(),
-        ..PdfComposeInput::default()
-    });
-    PDF_OK
+pub unsafe extern "C" fn pdf_inspector_markdown_options_init(out: *mut PdfMarkdownOptions) -> i32 {
+    init(out, input::default_markdown())
 }
 /// Open bytes or a UTF-8 path. Source and password memory may be released on return.
-/// NULL options use the default empty-password behavior.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_open(
     source: *const PdfSource,
-    options: *const PdfOpenOptions,
     out: *mut *mut PdfDocument,
-    error: *mut *mut PdfErrorHandle,
+    error: *mut *mut PdfError,
 ) -> i32 {
     publish(out, error, || {
         let source = input::required(source, "source")?;
@@ -234,15 +283,18 @@ pub unsafe extern "C" fn pdf_inspector_open(
             PDF_SOURCE_PATH => std::fs::read(input::path(source.data)?)?,
             _ => return Err(Failure::invalid("invalid source kind")),
         };
-        let password = if options.is_null() {
-            None
-        } else {
-            input::optional_text((*options).password)?.map(str::to_owned)
-        };
+        let password = input::optional_text(source.password)?;
         Ok(PdfDocument {
-            state: DocumentState::open(bytes, password.as_deref())?,
+            state: DocumentState::open(bytes, password)?,
         })
     })
+}
+/// Borrow page count, sheet-frame page dimensions, and the load audit; NULL returns NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pdf_inspector_document_info(
+    document: *const PdfDocument,
+) -> *const PdfDocumentInfo {
+    document.as_ref().map_or(ptr::null(), |d| &d.state.info)
 }
 /// Execute against an open document. NULL request uses initialized defaults.
 /// Each call publishes an independent result or an independent error.
@@ -251,61 +303,53 @@ pub unsafe extern "C" fn pdf_inspector_execute(
     document: *const PdfDocument,
     request: *const PdfRequest,
     out: *mut *mut PdfResult,
-    error: *mut *mut PdfErrorHandle,
+    error: *mut *mut PdfError,
 ) -> i32 {
     publish(out, error, || {
         let document = input::required(document, "document")?;
-        let request = if request.is_null() {
-            input::default_request()
-        } else {
-            *request
-        };
+        let request = input::or_default(request, "request", input::default_request)?;
         execute::run(&document.state, &request)
     })
 }
-/// Compose Markdown from plain text or positioned items, without a document handle.
+/// Compose Markdown from plain UTF-8 text. NULL options use the core defaults.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_compose(
-    input: *const PdfComposeInput,
+pub unsafe extern "C" fn pdf_inspector_compose_text(
+    text: PdfBytes,
+    options: *const PdfMarkdownOptions,
     out: *mut *mut PdfResult,
-    error: *mut *mut PdfErrorHandle,
+    error: *mut *mut PdfError,
 ) -> i32 {
     publish(out, error, || {
-        execute::compose(input::required(input, "composition input")?)
+        let options = markdown_options(options)?;
+        execute::compose_text(text, options)
     })
 }
-/// Borrow the immutable root view; NULL returns NULL.
+/// Compose Markdown from positioned items, without a document handle. NULL
+/// options use the core defaults.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_result_view(
-    result: *const PdfResult,
-) -> *const PdfResultView {
-    result.as_ref().map_or(ptr::null(), |r| &r.view)
+pub unsafe extern "C" fn pdf_inspector_compose_items(
+    input: *const PdfComposeInput,
+    options: *const PdfMarkdownOptions,
+    out: *mut *mut PdfResult,
+    error: *mut *mut PdfError,
+) -> i32 {
+    publish(out, error, || {
+        let options = markdown_options(options)?;
+        execute::compose_items(input::required(input, "composition input")?, options)
+    })
 }
-/// Borrow a diagnostic; NULL returns NULL. Other calls cannot invalidate it.
-#[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_error_view(
-    error: *const PdfErrorHandle,
-) -> *const PdfDiagnostic {
-    error.as_ref().map_or(ptr::null(), |e| &e.view)
-}
-/// Release a document. Existing results remain valid.
+/// Release a document and its info. Existing results remain valid.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_document_free(document: *mut PdfDocument) {
-    if !document.is_null() {
-        let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(document))));
-    }
+    release::<PdfDocument>(document);
 }
-/// Release a result and invalidate all views obtained from it.
+/// Release a result and everything reachable from it.
 #[no_mangle]
 pub unsafe extern "C" fn pdf_inspector_result_free(result: *mut PdfResult) {
-    if !result.is_null() {
-        let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(result))));
-    }
+    release::<ResultOwner>(result);
 }
-/// Release an error and invalidate its diagnostic view.
+/// Release an error and its message.
 #[no_mangle]
-pub unsafe extern "C" fn pdf_inspector_error_free(error: *mut PdfErrorHandle) {
-    if !error.is_null() {
-        drop(Box::from_raw(error));
-    }
+pub unsafe extern "C" fn pdf_inspector_error_free(error: *mut PdfError) {
+    release::<ErrorOwner>(error);
 }

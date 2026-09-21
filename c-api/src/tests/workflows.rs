@@ -38,11 +38,6 @@ fn document(contents: &[&str], image: bool) -> Document {
     doc.trailer.set("Root", root);
     doc
 }
-fn open(mut doc: Document) -> Doc {
-    let mut bytes = Vec::new();
-    doc.save_to(&mut bytes).unwrap();
-    Doc::bytes(&bytes, None)
-}
 fn ocr_span(text: &'static str, x: f32, y: f32, width: f32) -> PdfOcrSpan {
     PdfOcrSpan {
         text: view(text.as_bytes()),
@@ -83,11 +78,11 @@ fn attach(r: &mut PdfRequest, ocr: &PdfOcrPageInput) {
 fn analysis_and_detected_tables_need_no_markdown_or_hints() {
     let doc = Doc::open("real-estate-pricing");
     let mut r = input::default_request();
-    r.outputs = PDF_ANALYSIS | PDF_TABLES;
+    r.outputs = PDF_OUT_ANALYSIS | PDF_OUT_TABLES;
     let result = doc.run(&r);
     assert!(result.get().markdown.ptr.is_null());
     assert!(result.pages().iter().all(|p| p.markdown.ptr.is_null()));
-    assert_eq!(result.get().present & PDF_ANALYSIS, PDF_ANALYSIS);
+    assert_eq!(result.get().present & PDF_OUT_ANALYSIS, PDF_OUT_ANALYSIS);
     assert!(result
         .pages()
         .iter()
@@ -147,9 +142,9 @@ fn analysis_and_detected_tables_need_no_markdown_or_hints() {
 fn analysis_reports_garbled_text_without_text_output() {
     let doc = Doc::open("shifted_cipher_tounicode");
     let mut r = input::default_request();
-    r.outputs = PDF_ANALYSIS;
+    r.outputs = PDF_OUT_ANALYSIS;
     let result = doc.run(&r);
-    assert_eq!(result.get().has_encoding_issues, 1);
+    assert_ne!(result.get().flags & PDF_DOC_ENCODING_ISSUES, 0);
     assert!(result
         .pages()
         .iter()
@@ -180,7 +175,7 @@ fn semantic_nodes_keep_ancestors_metadata_and_selected_page_references() {
     source.catalog_mut().unwrap().set("StructTreeRoot", root);
     let doc = open(source);
     let mut r = input::default_request();
-    r.outputs = PDF_STRUCTURE;
+    r.outputs = PDF_OUT_STRUCTURE;
     let selection = [2];
     r.pages = PdfPageNumbers {
         ptr: selection.as_ptr(),
@@ -195,10 +190,7 @@ fn semantic_nodes_keep_ancestors_metadata_and_selected_page_references() {
         .unwrap()
     };
     assert_eq!(nodes.len(), 2);
-    assert_eq!(
-        (nodes[0].id, nodes[0].parent, nodes[1].id, nodes[1].parent),
-        (1, 0, 2, 1)
-    );
+    assert_eq!((nodes[0].parent, nodes[1].parent), (0, 1));
     assert_eq!(unsafe { string(nodes[0].role) }, "Sect");
     assert_eq!(unsafe { string(nodes[1].role) }, "Figure");
     assert_eq!(unsafe { string(nodes[1].alt_text) }, "Revenue chart");
@@ -206,7 +198,7 @@ fn semantic_nodes_keep_ancestors_metadata_and_selected_page_references() {
     assert_eq!(unsafe { string(nodes[1].language) }, "en-US");
     let refs = unsafe { input::slice(nodes[1].references.ptr, nodes[1].references.len).unwrap() };
     assert_eq!((refs[0].page, refs[0].mcid), (2, 7));
-    assert_eq!(result.get().present & PDF_ANALYSIS, 0);
+    assert_eq!(result.get().present & PDF_OUT_ANALYSIS, 0);
     drop(doc);
     assert_eq!(unsafe { string(nodes[1].alt_text) }, "Revenue chart");
 }
@@ -217,23 +209,31 @@ fn runtime_preparation_is_explicit_and_uses_owned_diagnostics() {
         let mut options = PdfRuntimeOptions::default();
         assert_eq!(pdf_inspector_runtime_options_init(&mut options), PDF_OK);
         assert_eq!(options.download_policy, PDF_DOWNLOAD_OFFLINE);
-        let mut result = std::ptr::dangling_mut();
+        let mut info = PdfRuntimeInfo {
+            capabilities: 0xdead_beef,
+            ..PdfRuntimeInfo::default()
+        };
         let mut error = null_mut();
         options.capabilities = PDF_CAP_EXTERNAL_OCR;
         assert_eq!(
-            pdf_inspector_prepare_runtime(&options, &mut result, &mut error),
+            pdf_inspector_prepare_runtime(&options, &mut info, &mut error),
             PDF_INVALID_ARGUMENT
         );
-        assert!(result.is_null());
+        assert_eq!(info.capabilities, 0);
         assert!(!error.is_null());
+        pdf_inspector_error_free(error);
+        assert_eq!(
+            pdf_inspector_prepare_runtime(&options, null_mut(), &mut error),
+            PDF_INVALID_ARGUMENT
+        );
         pdf_inspector_error_free(error);
         if !cfg!(feature = "ocr") {
             options.capabilities = PDF_CAP_OCR;
             assert_eq!(
-                pdf_inspector_prepare_runtime(&options, &mut result, &mut error),
+                pdf_inspector_prepare_runtime(&options, &mut info, &mut error),
                 PDF_UNSUPPORTED
             );
-            assert!(result.is_null());
+            assert_eq!(info.capabilities, 0);
             pdf_inspector_error_free(error);
         }
     }
@@ -249,14 +249,14 @@ fn offline_runtime_failure_needs_no_document_and_does_not_populate_models() {
         ..runtime::defaults()
     };
     unsafe {
-        let mut result = std::ptr::dangling_mut();
+        let mut info = PdfRuntimeInfo::default();
         let mut error = null_mut();
         assert_eq!(
-            pdf_inspector_prepare_runtime(&options, &mut result, &mut error),
+            pdf_inspector_prepare_runtime(&options, &mut info, &mut error),
             PDF_RUNTIME_ERROR
         );
-        assert!(result.is_null());
-        assert!(!string((*pdf_inspector_error_view(error)).message).is_empty());
+        assert!(info.model.ptr.is_null());
+        assert!(!string((*error).message).is_empty());
         pdf_inspector_error_free(error);
     }
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
@@ -283,7 +283,7 @@ fn external_ocr_fuses_page_space_spans_and_reports_tables() {
     let mut ocr = recognition(&spans);
     ocr.page = 2;
     let mut r = input::default_request();
-    r.outputs |= PDF_ANALYSIS;
+    r.outputs |= PDF_OUT_ANALYSIS;
     attach(&mut r, &ocr);
     let result = doc.run(&r);
     let pages = result.pages();
@@ -374,7 +374,7 @@ fn dest_goto_annot_forwards_dest_page() {
     doc.trailer.set("Root", root);
     let opened = open(doc);
     let mut r = input::default_request();
-    r.outputs = PDF_ITEMS;
+    r.outputs = PDF_OUT_ITEMS;
     let result = opened.run(&r);
     let items =
         unsafe { input::slice(result.pages()[0].items.ptr, result.pages()[0].items.len).unwrap() };

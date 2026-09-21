@@ -15,7 +15,7 @@ pub(super) struct DestLink {
 }
 
 pub(super) fn dest_items(
-    storage: &mut Storage,
+    storage: &Storage,
     doc: &Document,
     selected: &[u32],
     state: &DocumentState,
@@ -37,10 +37,10 @@ pub(super) fn dest_items(
                     &info,
                     frame,
                 ),
-                text: storage.bytes([]),
-                font: storage.bytes([]),
-                font_tag: storage.bytes([]),
-                link: storage.bytes([]),
+                text: storage.bytes(""),
+                font: storage.bytes(""),
+                font_tag: storage.bytes(""),
+                link: storage.bytes(""),
                 ..PdfItem::default()
             })
         })

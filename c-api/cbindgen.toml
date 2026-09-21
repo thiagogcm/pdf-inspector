@@ -6,4 +6,4 @@ cpp_compat = true
 no_includes = true
 sys_includes = ["stddef.h", "stdint.h"]
 [export]
-exclude = ["DEFAULT_RENDER_DPI", "DEFAULT_MAX_OUTPUT_BYTES"]
+exclude = ["DEFAULT_RENDER_DPI", "DEFAULT_MAX_OUTPUT_BYTES", "ResultOwner", "ErrorOwner"]
