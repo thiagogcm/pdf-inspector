@@ -210,6 +210,9 @@ pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
     if r.bold_from_weight > 1 {
         return Err(Failure::invalid("unknown bold_from_weight"));
     }
+    if r.include_invisible > 1 {
+        return Err(Failure::invalid("unknown include_invisible"));
+    }
     if !(100..=900).contains(&r.bold_weight_threshold) {
         return Err(Failure::invalid(
             "bold weight threshold is outside 100..900",
@@ -218,5 +221,6 @@ pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
     Ok(PositionOptions::new()
         .frame(frame)
         .bold_from_weight(r.bold_from_weight != 0)
-        .bold_weight_threshold(r.bold_weight_threshold as u16))
+        .bold_weight_threshold(r.bold_weight_threshold as u16)
+        .include_invisible(r.include_invisible != 0))
 }

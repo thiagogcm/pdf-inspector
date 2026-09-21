@@ -7,10 +7,7 @@ use pdf_inspector::vision::{
     FusedPageMarkdown, ImagePoint, ImageQuad, ModelIdentity, OcrPage, OcrRun, OcrSpan,
     PageContentSource, PageTransform, RenderPixelFormat, RenderedPage, RoutedOcrPage,
 };
-use pdf_inspector::{
-    DetectionConfig, PageMarkdown, PdfOptions, PositionFrame, PositionOptions, ProcessMode,
-    ScanStrategy,
-};
+use pdf_inspector::{DetectionConfig, PageMarkdown, PositionFrame, PositionOptions, ScanStrategy};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Instant;
 
@@ -18,19 +15,33 @@ use std::time::Instant;
 /// All processing runs the core's byte-oriented API against `bytes`.
 pub(super) struct DocumentState {
     bytes: Vec<u8>,
-    count: u32,
+    pub(super) count: u32,
     frames: Vec<PageFrameInfo>,
+    audit: PdfLoadAudit,
 }
 impl DocumentState {
     pub(super) fn open(bytes: Vec<u8>, password: Option<&str>) -> Fallible<Self> {
-        let (mut doc, count) =
-            pdf_inspector::load_document_from_mem_with_password(&bytes, password)?;
+        let (mut doc, count, repairs) =
+            pdf_inspector::load_document_from_mem_with_repairs(&bytes, password)?;
         // Later operations reparse the bytes without a password, so a source
         // that needed one is re-serialized in its decrypted form once. The
         // loader already strips the encryption dictionary, so the raw bytes
         // are probed instead; a false positive only costs a rewrite.
         let encrypted = password.is_some_and(|p| !p.is_empty())
             && bytes.windows(8).any(|window| window == b"/Encrypt");
+        let mut flags = 0;
+        if encrypted {
+            flags |= PDF_LOAD_DECRYPTED;
+        }
+        if repairs.leading_bytes > 0 {
+            flags |= PDF_LOAD_LEADING_BYTES;
+        }
+        if repairs.container_repaired {
+            flags |= PDF_LOAD_CONTAINER_REPAIRED;
+        }
+        if repairs.widened_form_bboxes > 0 {
+            flags |= PDF_LOAD_WIDENED_FORM_BBOX;
+        }
         let bytes = if encrypted {
             doc.encryption_state = None;
             doc.trailer.remove(b"Encrypt");
@@ -44,9 +55,13 @@ impl DocumentState {
         } else {
             bytes
         };
-        let bytes = match pdf_inspector::widen_degenerate_form_bboxes_mem(&bytes)? {
-            Some(repaired) => repaired,
-            None => bytes,
+        // The loader already counted the widened forms; only a source that
+        // needed widening is re-serialized (encrypted sources were just
+        // serialized from the widened document).
+        let bytes = if repairs.widened_form_bboxes > 0 && !encrypted {
+            pdf_inspector::widen_degenerate_form_bboxes_mem(&bytes)?.unwrap_or(bytes)
+        } else {
+            bytes
         };
         // Frames come from the tested core helper on the final (decrypted
         // and form-repaired) bytes, so encrypted sources do not need a
@@ -57,12 +72,17 @@ impl DocumentState {
             bytes,
             count,
             frames,
+            audit: PdfLoadAudit {
+                flags,
+                leading_bytes: u32::try_from(repairs.leading_bytes).unwrap_or(u32::MAX),
+                widened_form_bboxes: u32::try_from(repairs.widened_form_bboxes).unwrap_or(u32::MAX),
+            },
         })
     }
     fn document(&self) -> Fallible<Document> {
         Ok(pdf_inspector::load_document_from_mem_with_password(&self.bytes, None)?.0)
     }
-    fn frame_info(&self, page: u32) -> Fallible<PageFrameInfo> {
+    pub(super) fn frame_info(&self, page: u32) -> Fallible<PageFrameInfo> {
         self.frames
             .iter()
             .find(|f| f.page == page)
@@ -152,17 +172,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
 
     // 1. Classification. Per-page analysis and Markdown come from the
     //    page-oriented passes below, so detection alone is enough here.
-    let inspection = pdf_inspector::process_pdf_mem_with_options(
-        &state.bytes,
-        PdfOptions {
-            mode: ProcessMode::DetectOnly,
-            detection: config,
-            markdown: md.clone(),
-            page_filter: (selected.len() as u32 != state.count)
-                .then(|| selected.iter().copied().collect()),
-            password: None,
-        },
-    )?;
+    let inspection = pdf_inspector::detect_pdf_type_mem_with_config(&state.bytes, config)?;
     let mut storage = Storage::default();
     let mut view = PdfResultView {
         present: r.outputs | PDF_INSPECTION,
@@ -174,8 +184,12 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             pdf_inspector::PdfType::Mixed => PDF_TYPE_MIXED,
         },
         confidence: inspection.confidence,
-        has_encoding_issues: u32::from(inspection.has_encoding_issues),
+        has_encoding_issues: u32::from(inspection.ocr_reasons_by_page.values().any(|r| garbled(r))),
+        ocr_recommended: u32::from(inspection.ocr_recommended),
+        pages_sampled: inspection.pages_sampled,
+        pages_with_text: inspection.pages_with_text,
         title: storage.optional(inspection.title.as_deref()),
+        audit: state.audit,
         ..PdfResultView::default()
     };
 
@@ -281,7 +295,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
     } else {
         None
     };
-    let doc = if r.outputs & (PDF_STRUCTURE | PDF_TABLES) != 0 {
+    let doc = if r.outputs & (PDF_STRUCTURE | PDF_TABLES | PDF_ITEMS) != 0 {
         Some(state.document()?)
     } else {
         None
@@ -296,6 +310,12 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
         super::runtime::renderer()?
             .render_pages(&state.bytes, &selected, None, &render_options)
             .map_err(Failure::runtime)?
+    } else {
+        Vec::new()
+    };
+
+    let dest_links = if let (Some(doc), true) = (&doc, r.outputs & PDF_ITEMS != 0) {
+        super::links::dest_items(&mut storage, doc, &selected, state, frame)
     } else {
         Vec::new()
     };
@@ -336,9 +356,8 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             .or_else(|| {
                 inspection
                     .ocr_reasons_by_page
-                    .iter()
-                    .find(|p| p.page == *number)
-                    .map(|p| p.reasons.as_slice())
+                    .get(number)
+                    .map(Vec::as_slice)
             })
             .unwrap_or(&[]);
         p.ocr_reasons = storage.strings(reasons);
@@ -347,6 +366,9 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             || inspection.pages_needing_ocr.contains(number)
         {
             p.flags |= PDF_PAGE_NEEDS_OCR;
+        }
+        if ocr.ran && ocr.needs.contains(number) && !ocr.routed.contains(number) {
+            p.flags |= PDF_PAGE_NATIVE_RECOVERED;
         }
         if native
             .as_ref()
@@ -363,9 +385,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             p.flags |= PDF_PAGE_HAS_COLUMNS;
         }
         if view.present & PDF_ANALYSIS != 0
-            && (reasons
-                .iter()
-                .any(|reason| reason == pdf_inspector::OCR_REASON_SUSPECTED_GARBLED_TEXT)
+            && (garbled(reasons)
                 || native_page.is_some_and(|p| {
                     p.ocr_reason.as_deref()
                         == Some(pdf_inspector::OCR_REASON_SUSPECTED_GARBLED_TEXT)
@@ -400,17 +420,22 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             p.markdown = storage.bytes(page_md.as_bytes());
             markdown_parts.push((*number, page_md.to_owned()));
         }
+        let page_items = content
+            .as_ref()
+            .map(|c| {
+                c.items
+                    .iter()
+                    .filter(|i| i.page == *number)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if let Some(content) = &content {
-            let page_items = content
-                .items
-                .iter()
-                .filter(|i| i.page == *number)
-                .collect::<Vec<_>>();
             if r.outputs & PDF_ITEMS != 0 {
-                let items = page_items
+                let mut items = page_items
                     .iter()
                     .map(|i| storage.item(i, frame_height))
-                    .collect();
+                    .collect::<Vec<_>>();
+                items.extend(dest_links.iter().filter(|item| item.page == *number));
                 p.items = storage.items(items);
             }
             if r.outputs & PDF_TEXT != 0 {
@@ -474,6 +499,66 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
                         .collect(),
                 );
             }
+            if content.gid_pages.contains(number) {
+                p.flags |= PDF_PAGE_GID_ENCODED;
+            }
+            if content.skipped_invisible.contains(number) {
+                p.flags |= PDF_PAGE_SKIPPED_INVISIBLE;
+            }
+            let has_table = p.flags & PDF_PAGE_HAS_TABLES != 0;
+            // Both detectors filter by page, so hand them only this page's items.
+            let page_owned = page_items
+                .iter()
+                .map(|i| (*i).clone())
+                .collect::<Vec<pdf_inspector::TextItem>>();
+            let (columns, newspaper) =
+                pdf_inspector::extractor::page_column_layout(&page_owned, *number, has_table);
+            if columns.len() < 2 {
+                p.reading_order = PDF_READING_SINGLE;
+            } else {
+                p.flags |= PDF_PAGE_HAS_COLUMNS;
+                p.reading_order = if newspaper {
+                    PDF_READING_NEWSPAPER
+                } else {
+                    PDF_READING_TABULAR
+                };
+            }
+            p.columns = storage.intervals(
+                columns
+                    .into_iter()
+                    .map(|(x0, x1)| PdfInterval {
+                        x0: x0.min(x1),
+                        x1: x0.max(x1),
+                    })
+                    .collect(),
+            );
+            p.charts = storage.boxes(
+                pdf_inspector::tables::detect_chart_regions(&page_owned, &content.rects, *number)
+                    .into_iter()
+                    .map(|(x, y, w, h)| flip_box(x, y, w, h, frame_height))
+                    .collect(),
+            );
+            p.image_regions = storage.boxes(
+                page_items
+                    .iter()
+                    .filter_map(|item| image_region_box(item, frame_height))
+                    .collect(),
+            );
+        }
+        if r.outputs & (PDF_ITEMS | PDF_GEOMETRY | PDF_TEXT | PDF_MARKDOWN | PDF_ANALYSIS) != 0 {
+            let item_text = page_items
+                .iter()
+                .filter(|i| matches!(i.item_type, pdf_inspector::types::ItemType::Text))
+                .map(|i| i.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let quality_text = if item_text.trim().is_empty() {
+                page_md
+            } else {
+                item_text.as_str()
+            };
+            p.quality =
+                super::output::quality_view(pdf_inspector::text_quality_metrics(quality_text));
         }
         if r.outputs & PDF_STRUCTURE != 0 {
             let elements = elements
@@ -513,8 +598,9 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             content,
             doc.as_ref(),
             &selected,
-            state.count,
+            state,
             md.clone(),
+            frame,
         ),
         _ => Vec::new(),
     };
@@ -553,6 +639,7 @@ struct OcrOutcome {
     tables: Vec<u32>,
     columns: Vec<u32>,
     needs: Vec<u32>,
+    routed: Vec<u32>,
     reasons: Vec<pdf_inspector::PageOcrReasons>,
     markdown: Option<String>,
 }
@@ -591,6 +678,7 @@ unsafe fn native_ocr(
         tables: result.pages_with_tables,
         columns: result.pages_with_columns,
         needs: result.pages_recommended_for_ocr,
+        routed: result.pages_routed_to_ocr,
         reasons: result.ocr_reasons_by_page,
         markdown: Some(result.markdown),
     })
@@ -605,6 +693,15 @@ unsafe fn native_ocr(
     _local_pages: &[u32],
 ) -> Fallible<OcrOutcome> {
     Ok(OcrOutcome::default())
+}
+fn image_region_box(item: &pdf_inspector::TextItem, frame_height: f32) -> Option<PdfBox> {
+    pdf_inspector::significant_image_region(item)
+        .map(|r| flip_box(r.x, r.y, r.width, r.height, frame_height))
+}
+fn garbled(reasons: &[String]) -> bool {
+    reasons
+        .iter()
+        .any(|reason| reason == pdf_inspector::OCR_REASON_SUSPECTED_GARBLED_TEXT)
 }
 unsafe fn detection(d: PdfDetectionOptions, count: u32) -> Fallible<DetectionConfig> {
     ratio(d.text_page_ratio, "text-page ratio")?;
@@ -804,6 +901,7 @@ fn hinted_tables(
             markdown: storage.bytes(markdown.into_bytes()),
             fallback_reason: storage.optional(fallback.as_deref()),
             cells: storage.cells(cell_views),
+            ..PdfTable::default()
         });
     }
     Ok(views)
@@ -1104,7 +1202,13 @@ pub(super) unsafe fn compose(c: &PdfComposeInput) -> Fallible<PdfResult> {
                 let kind = match i.kind {
                     PDF_ITEM_TEXT => pdf_inspector::types::ItemType::Text,
                     PDF_ITEM_IMAGE => pdf_inspector::types::ItemType::Image,
-                    PDF_ITEM_LINK => pdf_inspector::types::ItemType::Link(text(i.link)?.into()),
+                    PDF_ITEM_LINK => {
+                        let uri = text(i.link)?;
+                        if uri.is_empty() && i.dest_page == 0 {
+                            return Err(Failure::invalid("link item has no URI or dest_page"));
+                        }
+                        pdf_inspector::types::ItemType::Link(uri.into())
+                    }
                     PDF_ITEM_FORM_FIELD => pdf_inspector::types::ItemType::FormField,
                     _ => return Err(Failure::invalid("invalid item kind")),
                 };

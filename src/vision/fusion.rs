@@ -9,7 +9,9 @@ use crate::markdown::{
     complete_table_markdown_from_items, to_markdown_from_items_with_rects_and_page_count,
     MarkdownOptions,
 };
-use crate::text_quality::{detect_encoding_issues, is_cid_garbage, is_garbage_text};
+use crate::text_quality::{
+    detect_encoding_issues, is_cid_garbage, is_garbage_text, text_quality_metrics,
+};
 use crate::types::{ItemType, PdfRect, TextItem};
 use crate::PageMarkdown;
 
@@ -559,30 +561,13 @@ fn assess_text_candidate(markdown: &str) -> Option<TextCandidateQuality> {
         return None;
     }
 
-    let alphanumeric_chars = markdown
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .count();
-    if alphanumeric_chars == 0 {
+    let metrics = text_quality_metrics(markdown);
+    if metrics.alphanumeric_chars == 0 {
         return None;
     }
-    let visible_chars = markdown
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .count()
-        .max(1);
-    let density = alphanumeric_chars as f32 / visible_chars as f32;
-    let length_score = (alphanumeric_chars as f32 / 160.0).min(1.0);
-    let nonempty_lines = markdown
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count()
-        .max(1);
-    let line_score = (alphanumeric_chars as f32 / nonempty_lines as f32 / 12.0).min(1.0);
-    let score = (0.45 + length_score * 0.25 + density * 0.20 + line_score * 0.10).min(1.0);
     Some(TextCandidateQuality {
-        alphanumeric_chars,
-        score,
+        alphanumeric_chars: metrics.alphanumeric_chars as usize,
+        score: metrics.score,
     })
 }
 

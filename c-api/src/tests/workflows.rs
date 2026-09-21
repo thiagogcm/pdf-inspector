@@ -96,14 +96,25 @@ fn analysis_and_detected_tables_need_no_markdown_or_hints() {
         .pages()
         .iter()
         .any(|p| p.flags & PDF_PAGE_HAS_COLUMNS != 0));
+    for page in result.pages() {
+        let columns = unsafe { input::slice(page.columns.ptr, page.columns.len).unwrap() };
+        assert!(columns.iter().all(|column| column.x1 >= column.x0));
+        if columns.len() >= 2 {
+            assert_ne!(page.flags & PDF_PAGE_HAS_COLUMNS, 0);
+        }
+    }
     let tables = unsafe { input::slice(result.get().tables.ptr, result.get().tables.len).unwrap() };
     assert!(
         !tables.is_empty(),
         "automatic tables must not require TSR inputs"
     );
-    assert!(tables
-        .iter()
-        .all(|t| t.flags & (PDF_TABLE_FROM_HINT | PDF_TABLE_HAS_BOUNDS) == 0));
+    assert!(tables.iter().all(|t| t.flags & PDF_TABLE_FROM_HINT == 0));
+    assert!(tables.iter().any(|t| {
+        t.flags & PDF_TABLE_HAS_BOUNDS != 0
+            && t.kind == PDF_TABLE_DATA
+            && t.column_edges.len >= 2
+            && t.row_edges.len >= 2
+    }));
     assert!(tables
         .iter()
         .any(|t| unsafe { string(t.markdown) }.contains("Multifamily")));
@@ -299,4 +310,78 @@ fn external_ocr_fuses_page_space_spans_and_reports_tables() {
         let e = expect_failure(doc.0, &r, PDF_INVALID_ARGUMENT);
         pdf_inspector_error_free(e);
     }
+}
+
+#[test]
+fn dest_goto_annot_forwards_dest_page() {
+    let mut doc = Document::with_version("1.5");
+    let pages = doc.new_object_id();
+    let font = doc.add_object(
+        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
+    let resources = dictionary! { "Font" => dictionary! { "F1" => font } };
+    let content1 = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 12 Tf 72 720 Td (A) Tj ET".to_vec(),
+    ));
+    let content2 = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 12 Tf 72 720 Td (B) Tj ET".to_vec(),
+    ));
+    let page2 = doc.new_object_id();
+    let annot = doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Link",
+        "Rect" => vec![72.into(), 700.into(), 140.into(), 730.into()],
+        "Dest" => vec![
+            page2.into(),
+            Object::Name(b"XYZ".to_vec()),
+            0.into(),
+            0.into(),
+            0.into(),
+        ],
+        "Border" => vec![0.into(), 0.into(), 0.into()],
+    });
+    let page1 = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages,
+        "Contents" => content1,
+        "Resources" => resources.clone(),
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Annots" => vec![annot.into()],
+    });
+    doc.objects.insert(
+        page2,
+        dictionary! {
+            "Type" => "Page",
+            "Parent" => pages,
+            "Contents" => content2,
+            "Resources" => resources,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        }
+        .into(),
+    );
+    doc.objects.insert(
+        pages,
+        dictionary! {
+            "Type" => "Pages",
+            "Count" => 2i64,
+            "Kids" => vec![page1.into(), page2.into()],
+        }
+        .into(),
+    );
+    let root = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    doc.trailer.set("Root", root);
+    let opened = open(doc);
+    let mut r = input::default_request();
+    r.outputs = PDF_ITEMS;
+    let result = opened.run(&r);
+    let items =
+        unsafe { input::slice(result.pages()[0].items.ptr, result.pages()[0].items.len).unwrap() };
+    assert!(
+        items
+            .iter()
+            .any(|item| item.kind == PDF_ITEM_LINK && item.dest_page == 2 && item.link.len == 0),
+        "Dest/GoTo annots must surface dest_page on extra C link items"
+    );
 }

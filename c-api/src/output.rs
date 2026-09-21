@@ -1,5 +1,6 @@
 use super::*;
-use pdf_inspector::{BoldSource, TextItem};
+use pdf_inspector::extractor::PageFrameInfo;
+use pdf_inspector::{BoldSource, PositionFrame, TextItem, TextQualityMetrics};
 use std::any::Any;
 
 #[derive(Default)]
@@ -66,6 +67,7 @@ impl Storage {
             text: self.bytes(item.text.as_bytes()),
             font: self.bytes(item.font.as_bytes()),
             font_tag: self.bytes(item.font_tag.as_bytes()),
+            dest_page: 0,
             link: self.optional(link),
         }
     }
@@ -160,6 +162,14 @@ impl Storage {
         let (ptr, len) = self.keep(v);
         PdfBoxes { ptr, len }
     }
+    pub(super) fn intervals(&mut self, v: Vec<PdfInterval>) -> PdfIntervals {
+        let (ptr, len) = self.keep(v);
+        PdfIntervals { ptr, len }
+    }
+    pub(super) fn floats(&mut self, v: Vec<f32>) -> PdfFloats {
+        let (ptr, len) = self.keep(v);
+        PdfFloats { ptr, len }
+    }
     pub(super) fn items(&mut self, v: Vec<PdfItem>) -> PdfItems {
         let (ptr, len) = self.keep(v);
         PdfItems { ptr, len }
@@ -206,4 +216,60 @@ impl Storage {
         let (ptr, len) = self.keep(v);
         PdfContentReferences { ptr, len }
     }
+}
+
+pub(super) fn quality_view(metrics: TextQualityMetrics) -> PdfPageQuality {
+    PdfPageQuality {
+        alphanumeric_chars: metrics.alphanumeric_chars,
+        visible_chars: metrics.visible_chars,
+        density: metrics.density,
+        replacement_chars: metrics.replacement_chars,
+        longest_replacement_run: metrics.longest_replacement_run,
+        english_cosine: metrics.english_cosine,
+        score: metrics.score,
+    }
+}
+
+/// User-space box to the request frame, top-left origin, y down.
+pub(super) fn user_box_to_view(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    info: &PageFrameInfo,
+    frame: PositionFrame,
+) -> PdfBox {
+    let (x0, y0) = user_point_to_view(x, y, info, frame);
+    let (x1, y1) = user_point_to_view(x + w, y + h, info, frame);
+    PdfBox {
+        x0: x0.min(x1),
+        y0: y0.min(y1),
+        x1: x0.max(x1),
+        y1: y0.max(y1),
+    }
+}
+
+pub(super) fn user_x_to_view(x: f32, y: f32, info: &PageFrameInfo, frame: PositionFrame) -> f32 {
+    user_point_to_view(x, y, info, frame).0
+}
+
+pub(super) fn user_y_to_view(x: f32, y: f32, info: &PageFrameInfo, frame: PositionFrame) -> f32 {
+    user_point_to_view(x, y, info, frame).1
+}
+
+fn user_point_to_view(x: f32, y: f32, info: &PageFrameInfo, frame: PositionFrame) -> (f32, f32) {
+    let sx = x - info.sheet_x0;
+    let sy = y - info.sheet_y0;
+    let (dx, dy_up, height) = match (frame, info.rotation_degrees) {
+        (PositionFrame::Display, 90) => (sy, info.sheet_width - sx, info.display_height),
+        (PositionFrame::Display, 180) => (
+            info.sheet_width - sx,
+            info.sheet_height - sy,
+            info.display_height,
+        ),
+        (PositionFrame::Display, 270) => (info.sheet_height - sy, sx, info.display_height),
+        (PositionFrame::Display, _) => (sx, sy, info.display_height),
+        (PositionFrame::Sheet, _) => (sx, sy, info.sheet_height),
+    };
+    (dx, height - dy_up)
 }
