@@ -367,16 +367,24 @@ pub struct PositionedPageContent {
 
 /// Extract items, path rectangles, and line segments from a memory buffer in
 /// one parse, in PDF user space. `page_filter` holds 1-indexed pages; `None`
-/// extracts every page.
+/// extracts every page. `options.frame` is ignored; this path stays in user
+/// space so table detection matches the Markdown pipeline.
 pub fn extract_positioned_page_content_mem(
     buffer: &[u8],
     page_filter: Option<&HashSet<u32>>,
+    options: PositionOptions,
 ) -> Result<PositionedPageContent, PdfError> {
     crate::validate_pdf_bytes(buffer)?;
     let (doc, _) = crate::load_document_from_mem(buffer)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
-    let ((items, rects, lines), thresholds, _gid_pages, rotations) =
-        extract_positioned_text_from_doc(&doc, &font_cmaps, page_filter)?;
+    let ((items, rects, lines), thresholds, _gid_pages, rotations) = extract_positioned_text_impl(
+        &doc,
+        &font_cmaps,
+        page_filter,
+        options.text_extraction(false),
+        None,
+        CoordinateFrame::UserSpace,
+    )?;
     Ok(PositionedPageContent {
         items,
         rects,
@@ -429,22 +437,22 @@ pub fn page_frame_info_mem(buffer: &[u8]) -> Result<Vec<PageFrameInfo>, PdfError
 }
 
 /// [`extract_positioned_page_content_mem`] in the visible-page-box frame
-/// ([`extract_text_with_positions`]), or in the rendered frame when `frame`
-/// is [`PositionFrame::Display`] (see
+/// ([`extract_text_with_positions`]), or in the rendered frame when
+/// `options.frame` is [`PositionFrame::Display`] (see
 /// [`extract_text_with_positions_mem_in_frame`]). Geometry is lower-left
 /// origin, `y` up; `rotations` keeps reporting predominantly rotated pages in
 /// both frames.
 pub fn extract_positioned_page_content_mem_in_frame(
     buffer: &[u8],
     page_filter: Option<&HashSet<u32>>,
-    frame: PositionFrame,
+    options: PositionOptions,
 ) -> Result<PositionedPageContent, PdfError> {
     crate::validate_pdf_bytes(buffer)?;
     let (doc, _) = crate::load_document_from_mem(buffer)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
     let ((mut items, mut rects, mut lines), thresholds, _gid_pages, rotations) =
-        extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter)?;
-    if frame == PositionFrame::Display {
+        extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter, options)?;
+    if options.frame == PositionFrame::Display {
         display_frame::document_items_to_display_frame(&doc, &mut items, &rotations);
         display_frame::document_rects_lines_to_display_frame(
             &doc, &mut rects, &mut lines, &rotations,

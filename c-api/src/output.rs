@@ -1,5 +1,5 @@
 use super::*;
-use pdf_inspector::TextItem;
+use pdf_inspector::{BoldSource, TextItem};
 use std::any::Any;
 
 #[derive(Default)]
@@ -56,11 +56,52 @@ impl Storage {
             rotation: (-item.rotation).rem_euclid(360.0),
             baseline_shift: item.baseline_shift,
             mcid: item.mcid.unwrap_or(0),
+            font_weight: item.font_weight.map(u32::from).unwrap_or(0),
+            bold_source: bold_source(item.bold_source),
+            fixed_pitch: match item.fixed_pitch {
+                None => PDF_PITCH_UNKNOWN,
+                Some(true) => PDF_PITCH_FIXED,
+                Some(false) => PDF_PITCH_PROPORTIONAL,
+            },
             text: self.bytes(item.text.as_bytes()),
             font: self.bytes(item.font.as_bytes()),
             font_tag: self.bytes(item.font_tag.as_bytes()),
             link: self.optional(link),
         }
+    }
+}
+fn bold_source(source: Option<BoldSource>) -> u32 {
+    match source {
+        None => 0,
+        Some(BoldSource::FontName) => PDF_BOLD_FONT_NAME,
+        Some(BoldSource::FontFlags) => PDF_BOLD_FONT_FLAGS,
+        Some(BoldSource::WeightClass) => PDF_BOLD_WEIGHT_CLASS,
+        Some(BoldSource::Painted) => PDF_BOLD_PAINTED,
+    }
+}
+pub(super) fn parse_font_weight(value: u32) -> Fallible<Option<u16>> {
+    match value {
+        0 => Ok(None),
+        100..=900 => Ok(Some(value as u16)),
+        _ => Err(Failure::invalid("font weight is outside 100..900")),
+    }
+}
+pub(super) fn parse_bold_source(value: u32) -> Fallible<Option<BoldSource>> {
+    match value {
+        0 => Ok(None),
+        PDF_BOLD_FONT_NAME => Ok(Some(BoldSource::FontName)),
+        PDF_BOLD_FONT_FLAGS => Ok(Some(BoldSource::FontFlags)),
+        PDF_BOLD_WEIGHT_CLASS => Ok(Some(BoldSource::WeightClass)),
+        PDF_BOLD_PAINTED => Ok(Some(BoldSource::Painted)),
+        _ => Err(Failure::invalid("unknown bold source")),
+    }
+}
+pub(super) fn parse_fixed_pitch(value: u32) -> Fallible<Option<bool>> {
+    match value {
+        PDF_PITCH_UNKNOWN => Ok(None),
+        PDF_PITCH_FIXED => Ok(Some(true)),
+        PDF_PITCH_PROPORTIONAL => Ok(Some(false)),
+        _ => Err(Failure::invalid("unknown fixed pitch")),
     }
 }
 /// y-up lower-left box to y-down top-left (presentation flip, no rotation).

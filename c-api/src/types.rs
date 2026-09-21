@@ -31,6 +31,22 @@ pub const PDF_FRAME_SHEET: u32 = 0;
 /// `/Rotate`, so region rects can be taken from a page image and items sit
 /// where a renderer draws them.
 pub const PDF_FRAME_DISPLAY: u32 = 1;
+/// `PdfItem.bold_source` when `is_bold` came from a bold word or foundry
+/// abbreviation in the font name.
+pub const PDF_BOLD_FONT_NAME: u32 = 1;
+/// `PdfItem.bold_source` when the FontDescriptor ForceBold flag or the
+/// embedded program's bold selection said bold.
+pub const PDF_BOLD_FONT_FLAGS: u32 = 2;
+/// `PdfItem.bold_source` when `bold_from_weight` credited the weight class.
+pub const PDF_BOLD_WEIGHT_CLASS: u32 = 3;
+/// `PdfItem.bold_source` when the run was filled and stroked to look heavier.
+pub const PDF_BOLD_PAINTED: u32 = 4;
+/// `PdfItem.fixed_pitch` when the face does not declare or measure a pitch.
+pub const PDF_PITCH_UNKNOWN: u32 = 0;
+/// `PdfItem.fixed_pitch` when the face is monospaced.
+pub const PDF_PITCH_FIXED: u32 = 1;
+/// `PdfItem.fixed_pitch` when the face is proportional.
+pub const PDF_PITCH_PROPORTIONAL: u32 = 2;
 pub const PDF_CAP_RENDER: u32 = 1;
 pub const PDF_CAP_OCR: u32 = 2;
 pub const PDF_CAP_DOWNLOAD: u32 = 4;
@@ -246,7 +262,9 @@ pub struct PdfOcrPageInput {
 /// Initialize with pdf_inspector_request_init. Empty page selection means all
 /// pages. Page lists are sets; query batches preserve input order. `frame`
 /// selects the coordinate frame for page dimensions, positioned runs,
-/// path geometry, and region rects (see `PDF_FRAME_*`).
+/// path geometry, and region rects (see `PDF_FRAME_*`). `bold_from_weight`
+/// is 0 or 1; `bold_weight_threshold` is the 100..=900 class that option
+/// treats as bold (600 by default).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfRequest {
@@ -260,10 +278,15 @@ pub struct PdfRequest {
     pub tables: PdfTableInputs,
     pub external_ocr: PdfOcrPageInputs,
     pub frame: u32,
+    pub bold_from_weight: u32,
+    pub bold_weight_threshold: u32,
 }
 /// Complete positioned run. Rotation is clockwise; positive baseline_shift
 /// denotes superscript. MCID is meaningful only when PDF_HAS_MCID is set.
 /// PDF_LEGACY_SYMBOL_REWRITE is decoding provenance, not an OCR verdict.
+/// `font_weight` is 0 when unknown, else 100..=900. `bold_source` is 0 when
+/// `is_bold` is unset, else `PDF_BOLD_FONT_*` / `PDF_BOLD_PAINTED`.
+/// `fixed_pitch` is `PDF_PITCH_*`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfItem {
@@ -275,6 +298,9 @@ pub struct PdfItem {
     pub rotation: f32,
     pub baseline_shift: f32,
     pub mcid: i64,
+    pub font_weight: u32,
+    pub bold_source: u32,
+    pub fixed_pitch: u32,
     pub text: PdfBytes,
     pub font: PdfBytes,
     pub font_tag: PdfBytes,

@@ -612,6 +612,7 @@ pub fn extract_pages_markdown_mem_with_options(
         options,
         options.strip_headers_footers,
         false,
+        false,
     )
     .map(|extraction| extraction.result)
 }

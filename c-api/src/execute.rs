@@ -8,7 +8,8 @@ use pdf_inspector::vision::{
     PageContentSource, PageTransform, RenderPixelFormat, RenderedPage, RoutedOcrPage,
 };
 use pdf_inspector::{
-    DetectionConfig, PageMarkdown, PdfOptions, PositionFrame, ProcessMode, ScanStrategy,
+    DetectionConfig, PageMarkdown, PdfOptions, PositionFrame, PositionOptions, ProcessMode,
+    ScanStrategy,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Instant;
@@ -43,8 +44,13 @@ impl DocumentState {
         } else {
             bytes
         };
-        // Frames come from the tested core helper on the final (decrypted)
-        // bytes, so encrypted sources do not need a password here.
+        let bytes = match pdf_inspector::widen_degenerate_form_bboxes_mem(&bytes)? {
+            Some(repaired) => repaired,
+            None => bytes,
+        };
+        // Frames come from the tested core helper on the final (decrypted
+        // and form-repaired) bytes, so encrypted sources do not need a
+        // password here.
         let frames =
             pdf_inspector::extractor::page_frame_info_mem(&bytes).map_err(Failure::from)?;
         Ok(Self {
@@ -87,14 +93,6 @@ impl DocumentState {
     }
 }
 
-fn request_frame(frame: u32) -> Fallible<PositionFrame> {
-    match frame {
-        PDF_FRAME_SHEET => Ok(PositionFrame::Sheet),
-        PDF_FRAME_DISPLAY => Ok(PositionFrame::Display),
-        _ => Err(Failure::invalid("unknown coordinate frame")),
-    }
-}
-
 const ALL_OUTPUTS: u32 = PDF_INSPECTION
     | PDF_MARKDOWN
     | PDF_TEXT
@@ -110,7 +108,8 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
     if r.outputs & !ALL_OUTPUTS != 0 {
         return Err(Failure::invalid("unknown output flags"));
     }
-    let frame = request_frame(r.frame)?;
+    let position = position_options(r)?;
+    let frame = position.frame;
     let selected = pages(r.pages, state.count)?;
     let md = markdown(&r.markdown)?;
     let render_options = render(&r.render)?;
@@ -250,7 +249,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             pdf_inspector::extractor::extract_positioned_page_content_mem_in_frame(
                 &state.bytes,
                 Some(&set),
-                frame,
+                position,
             )?,
         )
     } else {
@@ -264,7 +263,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             pdf_inspector::extractor::extract_positioned_page_content_mem_in_frame(
                 &state.bytes,
                 Some(&set),
-                PositionFrame::Sheet,
+                position.frame(PositionFrame::Sheet),
             )?,
         )
     } else {
@@ -276,6 +275,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
             pdf_inspector::extractor::extract_positioned_page_content_mem(
                 &state.bytes,
                 Some(&set),
+                position,
             )?,
         )
     } else {
@@ -505,7 +505,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<PdfR
     if r.outputs & PDF_TEXT != 0 {
         view.text = storage.bytes(text_parts.join("\n\n").into_bytes());
     }
-    let region_views = region_queries(&mut storage, state, regions, frame)?;
+    let region_views = region_queries(&mut storage, state, regions, position)?;
     view.regions = storage.regions(region_views);
     let mut table_views = match (&raw_content, r.outputs & PDF_TABLES != 0) {
         (Some(content), true) => super::tables::detect(
@@ -811,14 +811,14 @@ fn hinted_tables(
 /// Run text and table region queries as one batched core call per kind and
 /// vector-grid queries individually, preserving descriptor order.
 ///
-/// `frame` is the caller-visible frame of `regions`: display rects are
-/// converted back to the sheet frame before the core's sheet-frame queries
-/// run, while views echo the caller's original bounds.
+/// `position` is the caller-visible frame of `regions` plus bold-from-weight
+/// knobs: display rects are read in that frame, while views echo the
+/// caller's original bounds.
 fn region_queries(
     s: &mut Storage,
     state: &DocumentState,
     regions: &[PdfRegionInput],
-    frame: PositionFrame,
+    position: PositionOptions,
 ) -> Fallible<Vec<PdfRegion>> {
     let mut views = regions
         .iter()
@@ -847,9 +847,17 @@ fn region_queries(
             })
             .collect::<Fallible<Vec<_>>>()?;
         let results = if kind == PDF_REGION_TEXT {
-            pdf_inspector::extract_text_in_regions_mem_in_frame(&state.bytes, &request, frame)?
+            pdf_inspector::extract_text_in_regions_mem_with_options(
+                &state.bytes,
+                &request,
+                position,
+            )?
         } else {
-            pdf_inspector::extract_tables_in_regions_mem_in_frame(&state.bytes, &request, frame)?
+            pdf_inspector::extract_tables_in_regions_mem_with_options(
+                &state.bytes,
+                &request,
+                position,
+            )?
         };
         for (&i, mut result) in indices.iter().zip(results) {
             let Some(region) = result.regions.pop() else {
@@ -1008,8 +1016,8 @@ fn pixel_transform(t: PageTransform, sheet_x0: f32, sheet_y1: f32) -> PdfTransfo
         b: f64::from(p.y - x.y) / width,
         c: f64::from(y.x - p.x) / height,
         d: f64::from(p.y - y.y) / height,
-        e: f64::from(p.x - f64::from(sheet_x0)),
-        f: f64::from(f64::from(sheet_y1) - p.y),
+        e: f64::from(p.x) - f64::from(sheet_x0),
+        f: f64::from(sheet_y1) - f64::from(p.y),
     }
 }
 #[cfg(feature = "render-pdfium")]
@@ -1115,6 +1123,9 @@ pub(super) unsafe fn compose(c: &PdfComposeInput) -> Fallible<PdfResult> {
                     page: i.page,
                     is_bold: i.flags & PDF_BOLD != 0,
                     is_italic: i.flags & PDF_ITALIC != 0,
+                    font_weight: super::output::parse_font_weight(i.font_weight)?,
+                    bold_source: super::output::parse_bold_source(i.bold_source)?,
+                    fixed_pitch: super::output::parse_fixed_pitch(i.fixed_pitch)?,
                     is_underline: i.flags & PDF_UNDERLINE != 0,
                     is_strikeout: i.flags & PDF_STRIKEOUT != 0,
                     item_type: kind,

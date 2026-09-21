@@ -1,6 +1,6 @@
 use super::*;
 use pdf_inspector::vision::{OcrMode, RenderOptions, RenderPixelFormat};
-use pdf_inspector::{MarkdownOptions, MarkdownProfile};
+use pdf_inspector::{MarkdownOptions, MarkdownProfile, PositionFrame, PositionOptions};
 use std::collections::BTreeSet;
 
 pub(super) unsafe fn required<'a, T>(ptr: *const T, name: &str) -> Fallible<&'a T> {
@@ -170,6 +170,7 @@ pub(super) fn default_request() -> PdfRequest {
             hosted_confidence: 0.5,
             model_directory: PdfBytes::default(),
         },
+        bold_weight_threshold: 600,
         ..PdfRequest::default()
     }
 }
@@ -199,4 +200,23 @@ pub(super) fn ocr_mode(mode: u32) -> Fallible<OcrMode> {
         PDF_OCR_FORCE => Ok(OcrMode::Force),
         _ => Err(Failure::invalid("unknown OCR mode")),
     }
+}
+pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
+    let frame = match r.frame {
+        PDF_FRAME_SHEET => PositionFrame::Sheet,
+        PDF_FRAME_DISPLAY => PositionFrame::Display,
+        _ => return Err(Failure::invalid("unknown coordinate frame")),
+    };
+    if r.bold_from_weight > 1 {
+        return Err(Failure::invalid("unknown bold_from_weight"));
+    }
+    if !(100..=900).contains(&r.bold_weight_threshold) {
+        return Err(Failure::invalid(
+            "bold weight threshold is outside 100..900",
+        ));
+    }
+    Ok(PositionOptions::new()
+        .frame(frame)
+        .bold_from_weight(r.bold_from_weight != 0)
+        .bold_weight_threshold(r.bold_weight_threshold as u16))
 }
