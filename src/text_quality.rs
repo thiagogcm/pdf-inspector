@@ -225,6 +225,56 @@ impl CipherGarbleStats {
     }
 }
 
+/// Per-page native text quality numbers. `score` uses the same 0–1 formula
+/// fusion applies to a native candidate (`0.45 + length + density + lines`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextQualityMetrics {
+    pub alphanumeric_chars: u32,
+    pub visible_chars: u32,
+    pub density: f32,
+    pub replacement_chars: u32,
+    pub longest_replacement_run: u32,
+    pub english_cosine: f32,
+    pub score: f32,
+}
+
+/// Measure native-layer text quality. Empty input yields zeros and
+/// `english_cosine` 1.0 (no letters to disagree with English).
+pub fn text_quality_metrics(text: &str) -> TextQualityMetrics {
+    let alphanumeric_chars = text.chars().filter(|ch| ch.is_alphanumeric()).count();
+    let visible_chars = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    let density = if visible_chars == 0 {
+        0.0
+    } else {
+        alphanumeric_chars as f32 / visible_chars as f32
+    };
+    let (replacement_chars, longest_replacement_run) = replacement_text_stats(text);
+    let mut stats = CipherGarbleStats::default();
+    stats.add_text(text);
+    let english_cosine = stats.english_cosine() as f32;
+    let score = if alphanumeric_chars == 0 {
+        0.0
+    } else {
+        let length_score = (alphanumeric_chars as f32 / 160.0).min(1.0);
+        let nonempty_lines = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            .max(1);
+        let line_score = (alphanumeric_chars as f32 / nonempty_lines as f32 / 12.0).min(1.0);
+        (0.45 + length_score * 0.25 + density * 0.20 + line_score * 0.10).min(1.0)
+    };
+    TextQualityMetrics {
+        alphanumeric_chars: alphanumeric_chars as u32,
+        visible_chars: visible_chars as u32,
+        density,
+        replacement_chars: replacement_chars as u32,
+        longest_replacement_run: longest_replacement_run as u32,
+        english_cosine,
+        score,
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct TextQualityReport {
     pub(crate) pages_needing_ocr: Vec<u32>,

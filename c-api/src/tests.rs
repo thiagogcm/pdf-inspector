@@ -628,6 +628,7 @@ fn request_init_defaults_to_sheet_frame() {
     assert_eq!(request.frame, PDF_FRAME_SHEET);
     assert_eq!(request.bold_from_weight, 0);
     assert_eq!(request.bold_weight_threshold, 600);
+    assert_eq!(request.include_invisible, 0);
 }
 
 #[test]
@@ -650,6 +651,19 @@ fn unknown_bold_from_weight_is_rejected() {
     let mut r = input::default_request();
     r.outputs = PDF_ITEMS;
     r.bold_from_weight = 2;
+    unsafe {
+        let error = expect_failure(doc.0, &r, PDF_INVALID_ARGUMENT);
+        pdf_inspector_error_free(error);
+    }
+}
+
+#[test]
+fn unknown_include_invisible_is_rejected() {
+    let bytes = bytes_with_rotate(0);
+    let doc = Doc::bytes(&bytes, None);
+    let mut r = input::default_request();
+    r.outputs = PDF_ITEMS;
+    r.include_invisible = 2;
     unsafe {
         let error = expect_failure(doc.0, &r, PDF_INVALID_ARGUMENT);
         pdf_inspector_error_free(error);
@@ -716,6 +730,98 @@ fn item_view_copies_font_metadata() {
     assert_eq!(item.font_weight, 0);
     assert_eq!(item.bold_source, 0);
     assert_eq!(item.fixed_pitch, PDF_PITCH_UNKNOWN);
+    assert_eq!(item.dest_page, 0);
+}
+
+#[test]
+fn inspection_forwards_routing_sample_stats_and_load_audit() {
+    let doc = Doc::open("bare_name_struct");
+    let mut r = input::default_request();
+    r.outputs = PDF_INSPECTION;
+    let result = doc.run(&r);
+    let view = result.get();
+    assert!(view.pages_sampled > 0);
+    assert!(view.pages_with_text <= view.pages_sampled);
+    assert!(view.ocr_recommended <= 1);
+    assert_eq!(view.audit.leading_bytes, 0);
+    assert_eq!(view.audit.flags & PDF_LOAD_LEADING_BYTES, 0);
+    assert_eq!(view.audit.flags & PDF_LOAD_DECRYPTED, 0);
+    let page = &result.pages()[0];
+    assert_eq!(page.quality.alphanumeric_chars, 0);
+    assert_eq!(page.columns.len, 0);
+}
+
+#[test]
+fn load_audit_counts_leading_bytes_before_header() {
+    let mut bytes = b"% comment\n".to_vec();
+    bytes.extend_from_slice(&std::fs::read("../tests/fixtures/bare_name_struct.pdf").unwrap());
+    let doc = Doc::bytes(&bytes, None);
+    let mut r = input::default_request();
+    r.outputs = PDF_INSPECTION;
+    let result = doc.run(&r);
+    assert_eq!(result.get().audit.leading_bytes, 10);
+    assert_ne!(result.get().audit.flags & PDF_LOAD_LEADING_BYTES, 0);
+}
+
+#[test]
+fn analysis_forwards_native_quality_numbers() {
+    let doc = Doc::open("bare_name_struct");
+    let mut r = input::default_request();
+    r.outputs = PDF_ANALYSIS | PDF_ITEMS;
+    let result = doc.run(&r);
+    let page = &result.pages()[0];
+    assert!(page.quality.alphanumeric_chars > 0);
+    assert!(page.quality.visible_chars >= page.quality.alphanumeric_chars);
+    assert!(page.quality.density > 0.0);
+    assert!(page.quality.score > 0.0);
+    assert_eq!(page.reading_order, PDF_READING_SINGLE);
+    assert_eq!(page.flags & PDF_PAGE_HAS_COLUMNS, 0);
+    let columns = unsafe { input::slice(page.columns.ptr, page.columns.len).unwrap() };
+    assert!(columns.len() <= 1);
+    assert!(columns.iter().all(|column| column.x1 >= column.x0));
+    let items = unsafe { input::slice(page.items.ptr, page.items.len).unwrap() };
+    assert!(items.iter().all(|item| item.dest_page == 0));
+}
+
+#[test]
+fn quality_view_forwards_metrics() {
+    let metrics = pdf_inspector::text_quality_metrics("Hello world");
+    let view = super::output::quality_view(metrics);
+    assert_eq!(view.alphanumeric_chars, metrics.alphanumeric_chars);
+    assert_eq!(view.visible_chars, metrics.visible_chars);
+    assert_eq!(view.density, metrics.density);
+    assert_eq!(view.replacement_chars, metrics.replacement_chars);
+    assert_eq!(
+        view.longest_replacement_run,
+        metrics.longest_replacement_run
+    );
+    assert_eq!(view.english_cosine, metrics.english_cosine);
+    assert_eq!(view.score, metrics.score);
+    assert!(view.alphanumeric_chars > 0);
+    assert!(view.score > 0.0);
+}
+
+#[test]
+fn intervals_and_floats_are_stored() {
+    let mut storage = super::output::Storage::default();
+    let columns = storage.intervals(vec![PdfInterval { x0: 10.0, x1: 40.0 }]);
+    let columns = unsafe { input::slice(columns.ptr, columns.len).unwrap() };
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].x0, 10.0);
+    assert_eq!(columns[0].x1, 40.0);
+    let edges = storage.floats(vec![1.0, 2.5, 4.0]);
+    let edges = unsafe { input::slice(edges.ptr, edges.len).unwrap() };
+    assert_eq!(edges, [1.0, 2.5, 4.0]);
+}
+
+fn compose_one_item(info: &PdfPageInfo, item: &PdfItem) -> PdfComposeInput {
+    PdfComposeInput {
+        kind: PDF_COMPOSE_ITEMS,
+        pages: PdfPageInfos { ptr: info, len: 1 },
+        items: PdfItems { ptr: item, len: 1 },
+        markdown: input::default_markdown(),
+        ..PdfComposeInput::default()
+    }
 }
 
 #[test]
@@ -740,13 +846,7 @@ fn compose_reconstructs_font_metadata_fields() {
         height: 100.0,
         rotation: 0,
     };
-    let compose = PdfComposeInput {
-        kind: PDF_COMPOSE_ITEMS,
-        pages: PdfPageInfos { ptr: &info, len: 1 },
-        items: PdfItems { ptr: &item, len: 1 },
-        markdown: input::default_markdown(),
-        ..PdfComposeInput::default()
-    };
+    let compose = compose_one_item(&info, &item);
     let mut out = null_mut();
     let mut e = null_mut();
     unsafe {
@@ -755,13 +855,52 @@ fn compose_reconstructs_font_metadata_fields() {
     drop(ResultOwner(out));
     let mut bad = item;
     bad.font_weight = 50;
-    let compose = PdfComposeInput {
-        kind: PDF_COMPOSE_ITEMS,
-        pages: PdfPageInfos { ptr: &info, len: 1 },
-        items: PdfItems { ptr: &bad, len: 1 },
-        markdown: input::default_markdown(),
-        ..PdfComposeInput::default()
+    let compose = compose_one_item(&info, &bad);
+    unsafe {
+        assert_eq!(
+            pdf_inspector_compose(&compose, &mut out, &mut e),
+            PDF_INVALID_ARGUMENT
+        );
+        assert!(out.is_null());
+        pdf_inspector_error_free(e);
+    }
+}
+
+#[test]
+fn compose_accepts_dest_page_without_uri() {
+    let mut storage = super::output::Storage::default();
+    let item = PdfItem {
+        page: 1,
+        kind: PDF_ITEM_LINK,
+        dest_page: 2,
+        bounds: PdfBox {
+            x0: 1.0,
+            y0: 1.0,
+            x1: 10.0,
+            y1: 10.0,
+        },
+        text: storage.bytes([]),
+        font: storage.bytes([]),
+        font_tag: storage.bytes([]),
+        link: storage.bytes([]),
+        ..PdfItem::default()
     };
+    let info = PdfPageInfo {
+        page: 1,
+        width: 200.0,
+        height: 100.0,
+        rotation: 0,
+    };
+    let compose = compose_one_item(&info, &item);
+    let mut out = null_mut();
+    let mut e = null_mut();
+    unsafe {
+        assert_success(pdf_inspector_compose(&compose, &mut out, &mut e), e);
+    }
+    drop(ResultOwner(out));
+    let mut missing = item;
+    missing.dest_page = 0;
+    let compose = compose_one_item(&info, &missing);
     unsafe {
         assert_eq!(
             pdf_inspector_compose(&compose, &mut out, &mut e),
@@ -1050,6 +1189,7 @@ fn region_batch_order_and_tsr_validation() {
     let result = doc.run(&r);
     let table_out = unsafe { &*result.get().tables.ptr };
     assert_eq!(table_out.flags, PDF_TABLE_FROM_HINT | PDF_TABLE_HAS_BOUNDS);
+    assert_eq!(table_out.kind, PDF_TABLE_DATA);
     assert_eq!(result.get().present & PDF_TABLES, PDF_TABLES);
     assert_eq!(table_out.cells.len, 1);
     assert_eq!(
@@ -1247,8 +1387,8 @@ fn emit_c_layout_contract() {
     record!(PdfTableInput; page, mode, bounds, tokens, cells);
     record!(PdfOcrSpan; text, polygon, confidence, orientation, flags);
     record!(PdfOcrPageInput; page, flags, confidence, processing_ms, model, model_revision, warnings, spans);
-    record!(PdfRequest; outputs, pages, markdown, detection, render, ocr, regions, tables, external_ocr, frame, bold_from_weight, bold_weight_threshold);
-    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, font_weight, bold_source, fixed_pitch, text, font, font_tag, link);
+    record!(PdfRequest; outputs, pages, markdown, detection, render, ocr, regions, tables, external_ocr, frame, bold_from_weight, bold_weight_threshold, include_invisible);
+    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, font_weight, bold_source, fixed_pitch, dest_page, text, font, font_tag, link);
     record!(PdfStructureElement; page, mcid, role);
     record!(PdfStructureNode; id, parent, role, alt_text, actual_text, language, references);
     record!(PdfContentReference; page, mcid);
@@ -1258,16 +1398,21 @@ fn emit_c_layout_contract() {
     record!(PdfComposeInput; kind, text, pages, items, rectangles, lines, structure, markdown);
     record!(PdfImage; width, height, stride, format, pixels, pixel_to_page, page_to_pixel);
     record!(PdfProvenance; source, flags, confidence, render_dpi, render_ms, ocr_ms, assembly_ms, model, model_revision, warnings);
-    record!(PdfPage; info, flags, markdown, text, ocr_reasons, items, structure, rectangles, lines, image, provenance);
+    record!(PdfPageQuality; alphanumeric_chars, visible_chars, density, replacement_chars, longest_replacement_run, english_cosine, score);
+    record!(PdfInterval; x0, x1);
+    record!(PdfLoadAudit; flags, leading_bytes, widened_form_bboxes);
+    record!(PdfPage; info, flags, reading_order, quality, markdown, text, ocr_reasons, items, columns, charts, image_regions, structure, rectangles, lines, image, provenance);
     record!(PdfCell; row, column, row_span, column_span, flags, bounds, text);
     record!(PdfRegion; page, kind, flags, bounds, text, ocr_reason, tokens, cells);
-    record!(PdfTable; page, flags, input_index, bounds, markdown, fallback_reason, cells);
-    record!(PdfResultView; present, pdf_type, page_count, confidence, has_encoding_issues, processing_ms, title, markdown, text, pages, regions, tables, structure_nodes, runtime);
+    record!(PdfTable; page, flags, input_index, kind, bounds, markdown, fallback_reason, column_edges, row_edges, cells);
+    record!(PdfResultView; present, pdf_type, page_count, confidence, has_encoding_issues, ocr_recommended, pages_sampled, pages_with_text, processing_ms, title, markdown, text, pages, regions, tables, structure_nodes, runtime, audit);
     record!(PdfDiagnostic; status, message);
     record!(PdfPageNumbers; ptr, len);
     record!(PdfStrings; ptr, len);
     record!(PdfQuads; ptr, len);
     record!(PdfBoxes; ptr, len);
+    record!(PdfIntervals; ptr, len);
+    record!(PdfFloats; ptr, len);
     record!(PdfItems; ptr, len);
     record!(PdfPageInfos; ptr, len);
     record!(PdfStructureElements; ptr, len);

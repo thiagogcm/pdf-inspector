@@ -193,6 +193,30 @@
 
 #define PDF_PAGE_ENCODING_ISSUES 32
 
+#define PDF_PAGE_GID_ENCODED 64
+
+#define PDF_PAGE_SKIPPED_INVISIBLE 128
+
+#define PDF_PAGE_NATIVE_RECOVERED 256
+
+#define PDF_READING_SINGLE 0
+
+#define PDF_READING_TABULAR 1
+
+#define PDF_READING_NEWSPAPER 2
+
+#define PDF_LOAD_DECRYPTED 1
+
+#define PDF_LOAD_WIDENED_FORM_BBOX 2
+
+#define PDF_LOAD_LEADING_BYTES 4
+
+#define PDF_LOAD_CONTAINER_REPAIRED 8
+
+#define PDF_TABLE_DATA 0
+
+#define PDF_TABLE_TOC 1
+
 #define PDF_CONTENT_NATIVE 0
 
 #define PDF_CONTENT_OCR 1
@@ -407,7 +431,7 @@ typedef struct {
  * selects the coordinate frame for page dimensions, positioned runs,
  * path geometry, and region rects (see `PDF_FRAME_*`). `bold_from_weight`
  * is 0 or 1; `bold_weight_threshold` is the 100..=900 class that option
- * treats as bold (600 by default).
+ * treats as bold (600 by default). `include_invisible` is 0 or 1.
  */
 typedef struct {
   uint32_t outputs;
@@ -422,6 +446,7 @@ typedef struct {
   uint32_t frame;
   uint32_t bold_from_weight;
   uint32_t bold_weight_threshold;
+  uint32_t include_invisible;
 } PdfRequest;
 
 typedef struct {
@@ -442,7 +467,8 @@ typedef struct {
  * PDF_LEGACY_SYMBOL_REWRITE is decoding provenance, not an OCR verdict.
  * `font_weight` is 0 when unknown, else 100..=900. `bold_source` is 0 when
  * `is_bold` is unset, else `PDF_BOLD_FONT_*` / `PDF_BOLD_PAINTED`.
- * `fixed_pitch` is `PDF_PITCH_*`.
+ * `fixed_pitch` is `PDF_PITCH_*`. `dest_page` is a 1-indexed GoTo target;
+ * 0 means none. URI stays in `link`.
  */
 typedef struct {
   uint32_t page;
@@ -456,6 +482,7 @@ typedef struct {
   uint32_t font_weight;
   uint32_t bold_source;
   uint32_t fixed_pitch;
+  uint32_t dest_page;
   PdfBytes text;
   PdfBytes font;
   PdfBytes font_tag;
@@ -519,6 +546,39 @@ typedef struct {
 } PdfSource;
 
 /**
+ * Native-layer text quality numbers. `density` is alphanumeric/visible
+ * (`0` when there are no visible characters). `english_cosine` is 1 when
+ * there are no ASCII letters. `score` is the 0–1 native-candidate formula.
+ */
+typedef struct {
+  uint32_t alphanumeric_chars;
+  uint32_t visible_chars;
+  float density;
+  uint32_t replacement_chars;
+  uint32_t longest_replacement_run;
+  float english_cosine;
+  float score;
+} PdfPageQuality;
+
+/**
+ * Horizontal column interval in the request frame; y is not invented.
+ */
+typedef struct {
+  float x0;
+  float x1;
+} PdfInterval;
+
+typedef struct {
+  const PdfInterval *ptr;
+  size_t len;
+} PdfIntervals;
+
+typedef struct {
+  const PdfBox *ptr;
+  size_t len;
+} PdfBoxes;
+
+/**
  * Affine mapping: x' = a*x + c*y + e; y' = b*x + d*y + f.
  */
 typedef struct {
@@ -553,13 +613,23 @@ typedef struct {
   PdfStrings warnings;
 } PdfProvenance;
 
+/**
+ * `reading_order` is `PDF_READING_*`. `quality` is filled when native text
+ * or items are produced. `columns` are x-only intervals in the request frame.
+ * `charts` and `image_regions` are supplemental boxes in that frame.
+ */
 typedef struct {
   PdfPageInfo info;
   uint32_t flags;
+  uint32_t reading_order;
+  PdfPageQuality quality;
   PdfBytes markdown;
   PdfBytes text;
   PdfStrings ocr_reasons;
   PdfItems items;
+  PdfIntervals columns;
+  PdfBoxes charts;
+  PdfBoxes image_regions;
   PdfStructureElements structure;
   PdfRectangles rectangles;
   PdfSegments lines;
@@ -571,11 +641,6 @@ typedef struct {
   const PdfPage *ptr;
   size_t len;
 } PdfPages;
-
-typedef struct {
-  const PdfBox *ptr;
-  size_t len;
-} PdfBoxes;
 
 typedef struct {
   uint32_t page;
@@ -594,6 +659,11 @@ typedef struct {
 } PdfRegions;
 
 typedef struct {
+  const float *ptr;
+  size_t len;
+} PdfFloats;
+
+typedef struct {
   size_t row;
   size_t column;
   size_t row_span;
@@ -608,6 +678,10 @@ typedef struct {
   size_t len;
 } PdfCells;
 
+/**
+ * `kind` is `PDF_TABLE_DATA` or `PDF_TABLE_TOC`. `column_edges` / `row_edges`
+ * are detector bands in the request frame when `PDF_TABLE_HAS_BOUNDS` is set.
+ */
 typedef struct {
   uint32_t page;
   uint32_t flags;
@@ -615,9 +689,12 @@ typedef struct {
    * Index in request.tables for hinted results; meaningful only with PDF_TABLE_FROM_HINT.
    */
   size_t input_index;
+  uint32_t kind;
   PdfBox bounds;
   PdfBytes markdown;
   PdfBytes fallback_reason;
+  PdfFloats column_edges;
+  PdfFloats row_edges;
   PdfCells cells;
 } PdfTable;
 
@@ -662,8 +739,19 @@ typedef struct {
 } PdfRuntimeInfo;
 
 /**
+ * Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset.
+ */
+typedef struct {
+  uint32_t flags;
+  uint32_t leading_bytes;
+  uint32_t widened_form_bboxes;
+} PdfLoadAudit;
+
+/**
  * One immutable graph of borrowed records. All nested storage lasts until
  * pdf_inspector_result_free, independently of the source document.
+ * `ocr_recommended`, `pages_sampled`, and `pages_with_text` come from
+ * detector inspection. `audit` is recorded at open.
  */
 typedef struct {
   uint32_t present;
@@ -671,6 +759,9 @@ typedef struct {
   uint32_t page_count;
   float confidence;
   uint32_t has_encoding_issues;
+  uint32_t ocr_recommended;
+  uint32_t pages_sampled;
+  uint32_t pages_with_text;
   uint64_t processing_ms;
   PdfBytes title;
   PdfBytes markdown;
@@ -680,6 +771,7 @@ typedef struct {
   PdfTables tables;
   PdfStructureNodes structure_nodes;
   PdfRuntimeInfo runtime;
+  PdfLoadAudit audit;
 } PdfResultView;
 
 typedef struct {

@@ -95,6 +95,18 @@ pub const PDF_PAGE_HAS_COLUMNS: u32 = 4;
 pub const PDF_PAGE_OCR_RAN: u32 = 8;
 pub const PDF_PAGE_HOSTED_RECOMMENDED: u32 = 16;
 pub const PDF_PAGE_ENCODING_ISSUES: u32 = 32;
+pub const PDF_PAGE_GID_ENCODED: u32 = 64;
+pub const PDF_PAGE_SKIPPED_INVISIBLE: u32 = 128;
+pub const PDF_PAGE_NATIVE_RECOVERED: u32 = 256;
+pub const PDF_READING_SINGLE: u32 = 0;
+pub const PDF_READING_TABULAR: u32 = 1;
+pub const PDF_READING_NEWSPAPER: u32 = 2;
+pub const PDF_LOAD_DECRYPTED: u32 = 1;
+pub const PDF_LOAD_WIDENED_FORM_BBOX: u32 = 2;
+pub const PDF_LOAD_LEADING_BYTES: u32 = 4;
+pub const PDF_LOAD_CONTAINER_REPAIRED: u32 = 8;
+pub const PDF_TABLE_DATA: u32 = 0;
+pub const PDF_TABLE_TOC: u32 = 1;
 pub const PDF_CONTENT_NATIVE: u32 = 0;
 pub const PDF_CONTENT_OCR: u32 = 1;
 pub const PDF_CONTENT_FUSED: u32 = 2;
@@ -264,7 +276,7 @@ pub struct PdfOcrPageInput {
 /// selects the coordinate frame for page dimensions, positioned runs,
 /// path geometry, and region rects (see `PDF_FRAME_*`). `bold_from_weight`
 /// is 0 or 1; `bold_weight_threshold` is the 100..=900 class that option
-/// treats as bold (600 by default).
+/// treats as bold (600 by default). `include_invisible` is 0 or 1.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfRequest {
@@ -280,13 +292,15 @@ pub struct PdfRequest {
     pub frame: u32,
     pub bold_from_weight: u32,
     pub bold_weight_threshold: u32,
+    pub include_invisible: u32,
 }
 /// Complete positioned run. Rotation is clockwise; positive baseline_shift
 /// denotes superscript. MCID is meaningful only when PDF_HAS_MCID is set.
 /// PDF_LEGACY_SYMBOL_REWRITE is decoding provenance, not an OCR verdict.
 /// `font_weight` is 0 when unknown, else 100..=900. `bold_source` is 0 when
 /// `is_bold` is unset, else `PDF_BOLD_FONT_*` / `PDF_BOLD_PAINTED`.
-/// `fixed_pitch` is `PDF_PITCH_*`.
+/// `fixed_pitch` is `PDF_PITCH_*`. `dest_page` is a 1-indexed GoTo target;
+/// 0 means none. URI stays in `link`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfItem {
@@ -301,6 +315,7 @@ pub struct PdfItem {
     pub font_weight: u32,
     pub bold_source: u32,
     pub fixed_pitch: u32,
+    pub dest_page: u32,
     pub text: PdfBytes,
     pub font: PdfBytes,
     pub font_tag: PdfBytes,
@@ -391,15 +406,52 @@ pub struct PdfProvenance {
     pub model_revision: PdfBytes,
     pub warnings: PdfStrings,
 }
+/// Native-layer text quality numbers. `density` is alphanumeric/visible
+/// (`0` when there are no visible characters). `english_cosine` is 1 when
+/// there are no ASCII letters. `score` is the 0–1 native-candidate formula.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfPageQuality {
+    pub alphanumeric_chars: u32,
+    pub visible_chars: u32,
+    pub density: f32,
+    pub replacement_chars: u32,
+    pub longest_replacement_run: u32,
+    pub english_cosine: f32,
+    pub score: f32,
+}
+/// Horizontal column interval in the request frame; y is not invented.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfInterval {
+    pub x0: f32,
+    pub x1: f32,
+}
+/// Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfLoadAudit {
+    pub flags: u32,
+    pub leading_bytes: u32,
+    pub widened_form_bboxes: u32,
+}
+/// `reading_order` is `PDF_READING_*`. `quality` is filled when native text
+/// or items are produced. `columns` are x-only intervals in the request frame.
+/// `charts` and `image_regions` are supplemental boxes in that frame.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfPage {
     pub info: PdfPageInfo,
     pub flags: u32,
+    pub reading_order: u32,
+    pub quality: PdfPageQuality,
     pub markdown: PdfBytes,
     pub text: PdfBytes,
     pub ocr_reasons: PdfStrings,
     pub items: PdfItems,
+    pub columns: PdfIntervals,
+    pub charts: PdfBoxes,
+    pub image_regions: PdfBoxes,
     pub structure: PdfStructureElements,
     pub rectangles: PdfRectangles,
     pub lines: PdfSegments,
@@ -429,6 +481,8 @@ pub struct PdfRegion {
     pub tokens: PdfStrings,
     pub cells: PdfBoxes,
 }
+/// `kind` is `PDF_TABLE_DATA` or `PDF_TABLE_TOC`. `column_edges` / `row_edges`
+/// are detector bands in the request frame when `PDF_TABLE_HAS_BOUNDS` is set.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfTable {
@@ -436,13 +490,18 @@ pub struct PdfTable {
     pub flags: u32,
     /// Index in request.tables for hinted results; meaningful only with PDF_TABLE_FROM_HINT.
     pub input_index: usize,
+    pub kind: u32,
     pub bounds: PdfBox,
     pub markdown: PdfBytes,
     pub fallback_reason: PdfBytes,
+    pub column_edges: PdfFloats,
+    pub row_edges: PdfFloats,
     pub cells: PdfCells,
 }
 /// One immutable graph of borrowed records. All nested storage lasts until
 /// pdf_inspector_result_free, independently of the source document.
+/// `ocr_recommended`, `pages_sampled`, and `pages_with_text` come from
+/// detector inspection. `audit` is recorded at open.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfResultView {
@@ -451,6 +510,9 @@ pub struct PdfResultView {
     pub page_count: u32,
     pub confidence: f32,
     pub has_encoding_issues: u32,
+    pub ocr_recommended: u32,
+    pub pages_sampled: u32,
+    pub pages_with_text: u32,
     pub processing_ms: u64,
     pub title: PdfBytes,
     pub markdown: PdfBytes,
@@ -460,6 +522,7 @@ pub struct PdfResultView {
     pub tables: PdfTables,
     pub structure_nodes: PdfStructureNodes,
     pub runtime: PdfRuntimeInfo,
+    pub audit: PdfLoadAudit,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -493,6 +556,20 @@ pub struct PdfQuads {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfBoxes {
     pub ptr: *const PdfBox,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfIntervals {
+    pub ptr: *const PdfInterval,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfFloats {
+    pub ptr: *const f32,
     pub len: usize,
 }
 

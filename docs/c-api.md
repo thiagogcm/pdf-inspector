@@ -30,12 +30,15 @@ The adapter runs the core's byte-oriented public API, exactly as the Node and Py
 
 | Core change | Kind | Why it remains |
 | --- | --- | --- |
-| `validate_pdf_bytes`, `load_document_from_mem_with_password` | visibility | Open validates and decrypts once with the core loader and its repair heuristics |
+| `validate_pdf_bytes`, `load_document_from_mem_with_password`, `load_document_from_mem_with_repairs` | visibility | Open validates and decrypts once with the core loader and records load repairs |
 | `extractor::{visible_page_box, PageBox}` | visibility | Page dimensions and the coordinate frame every view is converted into |
 | `extract_pages_markdown_mem_with_options` | additive wrapper | Per-page Markdown with a password and the request's Markdown options |
-| `extractor::extract_positioned_page_content_mem` | additive wrapper | Items, rectangles, lines, thresholds, and rotations from one parse, with `PositionOptions` |
+| `extractor::extract_positioned_page_content_mem` | additive wrapper | Items, rectangles, lines, thresholds, rotations, gid pages, and skipped-invisible pages from one parse, with `PositionOptions` |
+| `extractor::page_column_layout` | additive wrapper | Column x-intervals and newspaper vs tabular reading order |
 | `markdown::{MarkdownDocumentContext, to_markdown_from_items_with_rects_and_lines}` | visibility | Role-aware composition without a document |
-| `markdown::detect_data_tables_from_items` | additive output mode | Logical data tables from the same detector that produces Markdown tables |
+| `markdown::detect_tables_from_items` | additive output mode | Logical tables including TOCs, with detector row/column bands |
+| `text_quality_metrics` | additive | Native-layer quality numbers shared with OCR fusion scoring |
+| `significant_image_region` | visibility | The OCR-region image size gate, reused for `PdfPage.image_regions` |
 | `structure_tree::StructRole::from_name` | visibility | Caller-supplied structure roles for composition |
 | `vision::cached_ocr_engine` | visibility | Runtime preparation warms the same process-cached OCR sessions |
 | Complete-table helpers gated on `vision` instead of `ocr` | cfg fix | Upstream's `vision`-only build does not compile; the C crate builds the core with `vision` |
@@ -96,25 +99,27 @@ int main(int argc, char **argv) {
 
 `PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfOpenOptions.password` supplies a UTF-8 password; NULL options use the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it. Form XObjects whose `/BBox` has no area are widened the same way the core loader repairs them, so later rendering and OCR see the repaired bytes.
 
-Initialize requests with `pdf_inspector_request_init`. NULL requests have the same defaults: all pages, inspection and document/page Markdown, upstream formatting and detection defaults, OCR off, the sheet coordinate frame, `bold_from_weight` off, and a bold weight threshold of 600. A page list is a set: numbers are 1-based, validated against the document, deduplicated, and returned in document order. An empty selection means all pages. The detector has its own optional page selection.
+Initialize requests with `pdf_inspector_request_init`. NULL requests have the same defaults: all pages, inspection and document/page Markdown, upstream formatting and detection defaults, OCR off, the sheet coordinate frame, `bold_from_weight` off, a bold weight threshold of 600, and `include_invisible` off. A page list is a set: numbers are 1-based, validated against the document, deduplicated, and returned in document order. An empty selection means all pages. The detector has its own optional page selection.
 
 ## Result projections
 
 | Output flag | Projection |
 | --- | --- |
-| `PDF_INSPECTION` | Classification, confidence, title, page dimensions, OCR reasons |
+| `PDF_INSPECTION` | Classification, confidence, title, page dimensions, OCR reasons, sample stats (`pages_sampled`, `pages_with_text`, `ocr_recommended`), and load audit |
 | `PDF_MARKDOWN` | Document and page Markdown, incorporating requested OCR fusion |
 | `PDF_TEXT` | Plain native text grouped into lines, per page and document |
-| `PDF_ITEMS` | Native positioned runs, including font family/tag, weight class, bold provenance, fixed pitch, styles, links, MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
+| `PDF_ITEMS` | Native positioned runs, including font family/tag, weight class, bold provenance, fixed pitch, styles, URI and Dest/GoTo links (`dest_page`), MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
 | `PDF_STRUCTURE` | Tagged structure references joined to items through `(page, mcid)` |
-| `PDF_GEOMETRY` | Native path rectangles and line segments |
+| `PDF_GEOMETRY` | Native path rectangles, line segments, column intervals, chart boxes, and large-image regions |
 | `PDF_RENDER` | Page pixels, dimensions, stride, format, and coordinate transforms |
-| `PDF_ANALYSIS` | Native layout/quality assessment, OCR reasons, and per-page encoding-issue flags, without text or Markdown output |
-| `PDF_TABLES` | Automatically detected native data tables with logical cell matrices, plus any explicit table queries |
+| `PDF_ANALYSIS` | Native layout/quality assessment, OCR reasons, per-page encoding-issue flags, and native text-quality numbers, without text or Markdown output |
+| `PDF_TABLES` | Automatically detected native tables (data and TOC) with logical cell matrices, detector bands, and outer bounds, plus any explicit table queries |
 
-Inspection accompanies every execution. Native text/items preserve the PDF's extraction evidence. Page provenance describes final Markdown. Page flags distinguish native OCR recommendations, actual recognition, tables, columns, and hosted-processing recommendations. Table flags incorporate tables found in final OCR Markdown as well as native layout evidence.
+Inspection accompanies every execution. Native text/items preserve the PDF's extraction evidence. Page provenance describes final Markdown. Page flags distinguish native OCR recommendations, actual recognition, native recovery (`PDF_PAGE_NATIVE_RECOVERED`: recommended for OCR but not routed), tables, columns, gid-encoded fonts, skipped invisible text, and hosted-processing recommendations. `reading_order` is `PDF_READING_SINGLE`, `PDF_READING_TABULAR`, or `PDF_READING_NEWSPAPER`. `PdfPage.quality` carries native-layer counts and the same 0–1 score OCR fusion uses for a native candidate, filled when items, geometry, text, Markdown, or analysis already ran. Document `ocr_recommended` is the detector's document-level OCR advice and is not the same as per-page `PDF_PAGE_NEEDS_OCR`. Table flags incorporate tables found in final OCR Markdown as well as native layout evidence. `PdfResultView.audit` records load-time decryption, leading bytes before `%PDF-`, container/xref rebuilds, and widened form `/BBox` counts.
 
-`PDF_ANALYSIS` is also marked present when Markdown or OCR processing requires it. When absent, unset layout/quality flags mean unassessed, not a clean bill of health. `PDF_PAGE_ENCODING_ISSUES` identifies pages whose OCR reasons report suspected garbled text; the document's `has_encoding_issues` aggregates selected pages. Analysis-only requests publish neither Markdown nor text.
+`include_invisible` is 0 or 1. When off, pages that dropped Tr-mode-3 text set `PDF_PAGE_SKIPPED_INVISIBLE`; those runs are recovered by setting the option and executing again.
+
+`PDF_ANALYSIS` is also marked present when Markdown or OCR processing requires it. When absent, unset layout/quality flags mean unassessed, not a clean bill of health. `PDF_PAGE_ENCODING_ISSUES` identifies pages whose OCR reasons report suspected garbled text; the document's `has_encoding_issues` aggregates selected pages. Analysis-only requests publish neither Markdown nor text. Native quality numbers (`PdfPageQuality`) are filled when items, text, Markdown, geometry, or analysis are requested.
 
 The document Markdown is the selected pages' Markdown in order, separated by blank lines, with `<!-- Page N -->` markers when `PDF_MD_PAGE_NUMBERS` is set. Native OCR returns the core pipeline's document Markdown instead.
 
@@ -139,7 +144,7 @@ PdfResult
 
 `request.tables` accepts TSR structure-token arrays and cell quadrilaterals. Tokens use the upstream TSR vocabulary, including `<td></td>` or split `<td`, attribute, `>` tokens. Before the core's lenient parser sees them, the adapter requires one cell quadrilateral per cell tag, integer `rowspan`/`colspan` values, `colspan` within the core's 25-column limit, and `rowspan` within the declared row count. `PDF_TSR_STRICT` returns resolved cells and their Markdown. `PDF_TSR_AUTO` applies upstream quality repair and heuristic fallback, reporting its reason. When a fallback or repair changes the cells, the cell array is empty rather than describing a different table from the returned Markdown. All hinted tables are resolved with at most two core calls.
 
-With `PDF_TABLES`, `result.tables` starts with automatically detected native data tables for the selected pages. TOCs are excluded. These tables contain the detector's logical cell matrix and its formatted Markdown; formatting may clean empty rows or cells. The detector does not retain a reliable cell-box or merged-span contract: automatic results leave `PDF_TABLE_HAS_BOUNDS`, `PDF_CELL_HAS_BOUNDS`, and `PDF_CELL_SPAN_KNOWN` unset. Their matrix entries use unit spans and do not claim header semantics. Do not interpret zero bounds as measured geometry.
+With `PDF_TABLES`, `result.tables` starts with automatically detected native tables for the selected pages, including tables of contents (`PDF_TABLE_TOC`; data tables are `PDF_TABLE_DATA`). These tables contain the detector's logical cell matrix, formatted Markdown, row/column band edges, and an outer box marked `PDF_TABLE_HAS_BOUNDS` when those bands exist. Formatting may clean empty rows or cells. Automatic results still leave `PDF_CELL_HAS_BOUNDS` and `PDF_CELL_SPAN_KNOWN` unset: matrix entries use unit spans and do not claim header semantics. Do not interpret zero cell bounds as measured geometry.
 
 Explicit table-query results follow automatic detections in input order, carry `PDF_TABLE_FROM_HINT`, and identify their descriptor through `input_index`. Their table bounds and resolved cell geometry/spans are marked available. Explicit queries remain independent of the output page selection and run even without `PDF_TABLES`; the result marks that collection present. If both automatic detection and explicit queries cover the same table, both pieces of evidence are returned, distinguished by origin. The automatic collection is native extraction evidence; OCR-discovered table presence is reflected in page flags, not synthesized native cells.
 
@@ -157,11 +162,11 @@ This exposes the structure the core parser recovered. It does not invent tags fo
 
 `PDF_FRAME_DISPLAY` reports the same geometry on the rendered page instead: the visible box turned clockwise by the inheritable `/Rotate`, top-left origin, Y down, with dimensions swapped by a quarter turn. Items sit where a renderer draws them, `rotation` reads `0` for text that renders horizontally (sheet rotation plus `/Rotate`), and region rects can be taken straight from a page image. Unknown frame values are rejected.
 
-`PdfRequest.bold_from_weight` is the same opt-in as the core positioned-text APIs: `0` (default) leaves `is_bold` and item merging unchanged; `1` also treats a weight class at or above `bold_weight_threshold` (600 by default, valid 100..=900) as bold. The threshold is validated even when the option is off. Markdown and native OCR ignore these knobs.
+`PdfRequest.bold_from_weight` is the same opt-in as the core positioned-text APIs: `0` (default) leaves `is_bold` and item merging unchanged; `1` also treats a weight class at or above `bold_weight_threshold` (600 by default, valid 100..=900) as bold. The threshold is validated even when the option is off. Markdown and native OCR ignore these knobs. `include_invisible` is validated as 0 or 1.
 
-Each item reports `font_weight` (`0` when unknown, otherwise 100..=900), `bold_source` (`0` when not bold, otherwise `PDF_BOLD_FONT_NAME`, `PDF_BOLD_FONT_FLAGS`, `PDF_BOLD_WEIGHT_CLASS`, or `PDF_BOLD_PAINTED`), and `fixed_pitch` (`PDF_PITCH_UNKNOWN`, `PDF_PITCH_FIXED`, or `PDF_PITCH_PROPORTIONAL`). These are extraction evidence, not Markdown styling.
+Each item reports `font_weight` (`0` when unknown, otherwise 100..=900), `bold_source` (`0` when not bold, otherwise `PDF_BOLD_FONT_NAME`, `PDF_BOLD_FONT_FLAGS`, `PDF_BOLD_WEIGHT_CLASS`, or `PDF_BOLD_PAINTED`), and `fixed_pitch` (`PDF_PITCH_UNKNOWN`, `PDF_PITCH_FIXED`, or `PDF_PITCH_PROPORTIONAL`). These are extraction evidence, not Markdown styling. URI links fill `link`; Dest/GoTo targets fill `dest_page` (1-indexed, `0` if none) on extra `PDF_ITEM_LINK` items that are not part of Markdown.
 
-Text, region, rectangle, and line geometry all follow the request frame. Plain-text content is frame-independent and grouped in sheet order, so the frame never changes line breaks. Text rotation is clockwise in `[0,360)`; positive `baseline_shift` means raised text, independently of the direction of the Y axis. `PDF_ADVANCE_KNOWN` distinguishes measured text advances from estimates. `PDF_LEGACY_SYMBOL_REWRITE` marks runs whose decoded text includes a character changed by legacy symbol cleanup; it is decoding provenance, not an OCR verdict, and its absence is not a guarantee of decoding accuracy.
+Text, region, rectangle, line, column, chart, and image-region geometry all follow the request frame. Column intervals are x-only. Plain-text content is frame-independent and grouped in sheet order, so the frame never changes line breaks. Text rotation is clockwise in `[0,360)`; positive `baseline_shift` means raised text, independently of the direction of the Y axis. `PDF_ADVANCE_KNOWN` distinguishes measured text advances from estimates. `PDF_LEGACY_SYMBOL_REWRITE` marks runs whose decoded text includes a character changed by legacy symbol cleanup; it is decoding provenance, not an OCR verdict, and its absence is not a guarantee of decoding accuracy.
 
 Table structure inputs, external OCR spans, and rendered-image transforms remain in the sheet frame.
 
