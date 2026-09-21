@@ -1,3 +1,4 @@
+use super::output::narrow;
 use super::*;
 use lopdf::Document;
 use pdf_inspector::extractor::{PageFrameInfo, PositionedPageContent};
@@ -9,7 +10,7 @@ use pdf_inspector::{MarkdownOptions, PositionFrame};
 /// Automatically detected native tables on the selected pages, through
 /// the same detector the Markdown pipeline uses, including TOCs.
 pub(super) fn detect(
-    storage: &mut Storage,
+    storage: &Storage,
     content: &PositionedPageContent,
     doc: Option<&Document>,
     selected: &[u32],
@@ -33,7 +34,7 @@ pub(super) fn detect(
             page_thresholds: &content.thresholds,
             struct_roles: roles.as_ref(),
             struct_tables: &tagged_tables,
-            page_count: state.count,
+            page_count: state.count(),
             prefiltered_page_number_pages: None,
             prefiltered_page_number_mask: None,
             precomputed_chart_regions: None,
@@ -44,25 +45,16 @@ pub(super) fn detect(
     .map(|(page, table)| {
         let info = state.frame_info(page).ok();
         let (bounds, column_edges, row_edges, flags) = table_geometry(&table, info.as_ref(), frame);
-        let cells = table
-            .cells
-            .iter()
-            .enumerate()
-            .flat_map(|(row, cells)| {
-                cells
-                    .iter()
-                    .enumerate()
-                    .map(move |(column, text)| (row, column, text))
-            })
-            .map(|(row, column, text)| PdfCell {
-                row,
-                column,
+        let cells = table.cells.iter().enumerate().flat_map(|(row, cells)| {
+            cells.iter().enumerate().map(move |(column, text)| PdfCell {
+                row: narrow(row),
+                column: narrow(column),
                 row_span: 1,
                 column_span: 1,
-                text: storage.bytes(text.as_bytes()),
+                text: storage.bytes(text),
                 ..PdfCell::default()
             })
-            .collect();
+        });
         PdfTable {
             page,
             flags,
@@ -71,10 +63,10 @@ pub(super) fn detect(
                 TableKind::Toc => PDF_TABLE_TOC,
             },
             bounds,
-            markdown: storage.bytes(pdf_inspector::tables::table_to_markdown(&table).into_bytes()),
-            column_edges: storage.floats(column_edges),
-            row_edges: storage.floats(row_edges),
-            cells: storage.cells(cells),
+            markdown: storage.owned(pdf_inspector::tables::table_to_markdown(&table).into_bytes()),
+            column_edges: storage.slice(column_edges),
+            row_edges: storage.slice(row_edges),
+            cells: storage.slice(cells),
             ..PdfTable::default()
         }
     })
