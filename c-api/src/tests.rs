@@ -618,12 +618,16 @@ fn request_init_defaults_to_sheet_frame() {
     let mut request = PdfRequest {
         outputs: 0xdead_beef,
         frame: 0xdead_beef,
+        bold_from_weight: 0xdead_beef,
+        bold_weight_threshold: 0,
         ..PdfRequest::default()
     };
     unsafe {
         assert_success(pdf_inspector_request_init(&mut request), null_mut());
     }
     assert_eq!(request.frame, PDF_FRAME_SHEET);
+    assert_eq!(request.bold_from_weight, 0);
+    assert_eq!(request.bold_weight_threshold, 600);
 }
 
 #[test]
@@ -636,6 +640,135 @@ fn unknown_frame_is_rejected() {
     unsafe {
         let error = expect_failure(doc.0, &r, PDF_INVALID_ARGUMENT);
         pdf_inspector_error_free(error);
+    }
+}
+
+#[test]
+fn unknown_bold_from_weight_is_rejected() {
+    let bytes = bytes_with_rotate(0);
+    let doc = Doc::bytes(&bytes, None);
+    let mut r = input::default_request();
+    r.outputs = PDF_ITEMS;
+    r.bold_from_weight = 2;
+    unsafe {
+        let error = expect_failure(doc.0, &r, PDF_INVALID_ARGUMENT);
+        pdf_inspector_error_free(error);
+    }
+}
+
+#[test]
+fn bold_weight_threshold_outside_scale_is_rejected() {
+    let bytes = bytes_with_rotate(0);
+    let doc = Doc::bytes(&bytes, None);
+    for threshold in [99, 901] {
+        let mut r = input::default_request();
+        r.outputs = PDF_ITEMS;
+        r.bold_weight_threshold = threshold;
+        unsafe {
+            let error = expect_failure(doc.0, &r, PDF_INVALID_ARGUMENT);
+            pdf_inspector_error_free(error);
+        }
+    }
+}
+
+fn sample_text_item() -> pdf_inspector::TextItem {
+    pdf_inspector::TextItem {
+        text: "Heavy".into(),
+        x: 10.0,
+        y: 20.0,
+        width: 30.0,
+        height: 12.0,
+        rotation: 0.0,
+        advance_known: true,
+        font: "Test".into(),
+        font_tag: "F1".into(),
+        legacy_symbol_rewrite: false,
+        font_size: 12.0,
+        page: 1,
+        is_bold: true,
+        is_italic: false,
+        font_weight: Some(700),
+        bold_source: Some(pdf_inspector::BoldSource::FontName),
+        fixed_pitch: Some(true),
+        is_underline: false,
+        is_strikeout: false,
+        item_type: pdf_inspector::types::ItemType::Text,
+        mcid: None,
+        baseline_shift: 0.0,
+    }
+}
+
+#[test]
+fn item_view_copies_font_metadata() {
+    let mut storage = super::output::Storage::default();
+    let item = storage.item(&sample_text_item(), 100.0);
+    assert_eq!(item.font_weight, 700);
+    assert_eq!(item.bold_source, PDF_BOLD_FONT_NAME);
+    assert_eq!(item.fixed_pitch, PDF_PITCH_FIXED);
+    let blank = pdf_inspector::TextItem {
+        is_bold: false,
+        font_weight: None,
+        bold_source: None,
+        fixed_pitch: None,
+        ..sample_text_item()
+    };
+    let item = storage.item(&blank, 100.0);
+    assert_eq!(item.font_weight, 0);
+    assert_eq!(item.bold_source, 0);
+    assert_eq!(item.fixed_pitch, PDF_PITCH_UNKNOWN);
+}
+
+#[test]
+fn compose_reconstructs_font_metadata_fields() {
+    let mut storage = super::output::Storage::default();
+    let item = storage.item(&sample_text_item(), 100.0);
+    assert_eq!(
+        super::output::parse_font_weight(item.font_weight).unwrap(),
+        Some(700)
+    );
+    assert_eq!(
+        super::output::parse_bold_source(item.bold_source).unwrap(),
+        Some(pdf_inspector::BoldSource::FontName)
+    );
+    assert_eq!(
+        super::output::parse_fixed_pitch(item.fixed_pitch).unwrap(),
+        Some(true)
+    );
+    let info = PdfPageInfo {
+        page: 1,
+        width: 200.0,
+        height: 100.0,
+        rotation: 0,
+    };
+    let compose = PdfComposeInput {
+        kind: PDF_COMPOSE_ITEMS,
+        pages: PdfPageInfos { ptr: &info, len: 1 },
+        items: PdfItems { ptr: &item, len: 1 },
+        markdown: input::default_markdown(),
+        ..PdfComposeInput::default()
+    };
+    let mut out = null_mut();
+    let mut e = null_mut();
+    unsafe {
+        assert_success(pdf_inspector_compose(&compose, &mut out, &mut e), e);
+    }
+    drop(ResultOwner(out));
+    let mut bad = item;
+    bad.font_weight = 50;
+    let compose = PdfComposeInput {
+        kind: PDF_COMPOSE_ITEMS,
+        pages: PdfPageInfos { ptr: &info, len: 1 },
+        items: PdfItems { ptr: &bad, len: 1 },
+        markdown: input::default_markdown(),
+        ..PdfComposeInput::default()
+    };
+    unsafe {
+        assert_eq!(
+            pdf_inspector_compose(&compose, &mut out, &mut e),
+            PDF_INVALID_ARGUMENT
+        );
+        assert!(out.is_null());
+        pdf_inspector_error_free(e);
     }
 }
 
@@ -1114,8 +1247,8 @@ fn emit_c_layout_contract() {
     record!(PdfTableInput; page, mode, bounds, tokens, cells);
     record!(PdfOcrSpan; text, polygon, confidence, orientation, flags);
     record!(PdfOcrPageInput; page, flags, confidence, processing_ms, model, model_revision, warnings, spans);
-    record!(PdfRequest; outputs, pages, markdown, detection, render, ocr, regions, tables, external_ocr, frame);
-    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, text, font, font_tag, link);
+    record!(PdfRequest; outputs, pages, markdown, detection, render, ocr, regions, tables, external_ocr, frame, bold_from_weight, bold_weight_threshold);
+    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, font_weight, bold_source, fixed_pitch, text, font, font_tag, link);
     record!(PdfStructureElement; page, mcid, role);
     record!(PdfStructureNode; id, parent, role, alt_text, actual_text, language, references);
     record!(PdfContentReference; page, mcid);

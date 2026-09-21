@@ -33,7 +33,7 @@ The adapter runs the core's byte-oriented public API, exactly as the Node and Py
 | `validate_pdf_bytes`, `load_document_from_mem_with_password` | visibility | Open validates and decrypts once with the core loader and its repair heuristics |
 | `extractor::{visible_page_box, PageBox}` | visibility | Page dimensions and the coordinate frame every view is converted into |
 | `extract_pages_markdown_mem_with_options` | additive wrapper | Per-page Markdown with a password and the request's Markdown options |
-| `extractor::extract_positioned_page_content_mem` | additive wrapper | Items, rectangles, lines, thresholds, and rotations from one parse |
+| `extractor::extract_positioned_page_content_mem` | additive wrapper | Items, rectangles, lines, thresholds, and rotations from one parse, with `PositionOptions` |
 | `markdown::{MarkdownDocumentContext, to_markdown_from_items_with_rects_and_lines}` | visibility | Role-aware composition without a document |
 | `markdown::detect_data_tables_from_items` | additive output mode | Logical data tables from the same detector that produces Markdown tables |
 | `structure_tree::StructRole::from_name` | visibility | Caller-supplied structure roles for composition |
@@ -94,9 +94,9 @@ int main(int argc, char **argv) {
 }
 ```
 
-`PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfOpenOptions.password` supplies a UTF-8 password; NULL options use the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it.
+`PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfOpenOptions.password` supplies a UTF-8 password; NULL options use the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it. Form XObjects whose `/BBox` has no area are widened the same way the core loader repairs them, so later rendering and OCR see the repaired bytes.
 
-Initialize requests with `pdf_inspector_request_init`. NULL requests have the same defaults: all pages, inspection and document/page Markdown, upstream formatting and detection defaults, and OCR off. A page list is a set: numbers are 1-based, validated against the document, deduplicated, and returned in document order. An empty selection means all pages. The detector has its own optional page selection.
+Initialize requests with `pdf_inspector_request_init`. NULL requests have the same defaults: all pages, inspection and document/page Markdown, upstream formatting and detection defaults, OCR off, the sheet coordinate frame, `bold_from_weight` off, and a bold weight threshold of 600. A page list is a set: numbers are 1-based, validated against the document, deduplicated, and returned in document order. An empty selection means all pages. The detector has its own optional page selection.
 
 ## Result projections
 
@@ -105,7 +105,7 @@ Initialize requests with `pdf_inspector_request_init`. NULL requests have the sa
 | `PDF_INSPECTION` | Classification, confidence, title, page dimensions, OCR reasons |
 | `PDF_MARKDOWN` | Document and page Markdown, incorporating requested OCR fusion |
 | `PDF_TEXT` | Plain native text grouped into lines, per page and document |
-| `PDF_ITEMS` | Native positioned runs, including font family/tag, styles, links, MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
+| `PDF_ITEMS` | Native positioned runs, including font family/tag, weight class, bold provenance, fixed pitch, styles, links, MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
 | `PDF_STRUCTURE` | Tagged structure references joined to items through `(page, mcid)` |
 | `PDF_GEOMETRY` | Native path rectangles and line segments |
 | `PDF_RENDER` | Page pixels, dimensions, stride, format, and coordinate transforms |
@@ -156,6 +156,10 @@ This exposes the structure the core parser recovered. It does not invent tags fo
 `PdfRequest.frame` selects the coordinate frame for page dimensions, positioned runs, path geometry, and region rects. `PDF_FRAME_SHEET` (default) uses PDF points relative to the unrotated visible page box, with a top-left origin and Y increasing downward. The visible box is the intersection of CropBox and MediaBox, using upstream fallbacks for missing or invalid boxes. Width and height describe that unrotated box; `PdfPageInfo.rotation` reports the inherited PDF `/Rotate` value separately.
 
 `PDF_FRAME_DISPLAY` reports the same geometry on the rendered page instead: the visible box turned clockwise by the inheritable `/Rotate`, top-left origin, Y down, with dimensions swapped by a quarter turn. Items sit where a renderer draws them, `rotation` reads `0` for text that renders horizontally (sheet rotation plus `/Rotate`), and region rects can be taken straight from a page image. Unknown frame values are rejected.
+
+`PdfRequest.bold_from_weight` is the same opt-in as the core positioned-text APIs: `0` (default) leaves `is_bold` and item merging unchanged; `1` also treats a weight class at or above `bold_weight_threshold` (600 by default, valid 100..=900) as bold. The threshold is validated even when the option is off. Markdown and native OCR ignore these knobs.
+
+Each item reports `font_weight` (`0` when unknown, otherwise 100..=900), `bold_source` (`0` when not bold, otherwise `PDF_BOLD_FONT_NAME`, `PDF_BOLD_FONT_FLAGS`, `PDF_BOLD_WEIGHT_CLASS`, or `PDF_BOLD_PAINTED`), and `fixed_pitch` (`PDF_PITCH_UNKNOWN`, `PDF_PITCH_FIXED`, or `PDF_PITCH_PROPORTIONAL`). These are extraction evidence, not Markdown styling.
 
 Text, region, rectangle, and line geometry all follow the request frame. Plain-text content is frame-independent and grouped in sheet order, so the frame never changes line breaks. Text rotation is clockwise in `[0,360)`; positive `baseline_shift` means raised text, independently of the direction of the Y axis. `PDF_ADVANCE_KNOWN` distinguishes measured text advances from estimates. `PDF_LEGACY_SYMBOL_REWRITE` marks runs whose decoded text includes a character changed by legacy symbol cleanup; it is decoding provenance, not an OCR verdict, and its absence is not a guarantee of decoding accuracy.
 

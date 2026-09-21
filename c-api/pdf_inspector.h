@@ -60,6 +60,43 @@
  */
 #define PDF_FRAME_DISPLAY 1
 
+/**
+ * `PdfItem.bold_source` when `is_bold` came from a bold word or foundry
+ * abbreviation in the font name.
+ */
+#define PDF_BOLD_FONT_NAME 1
+
+/**
+ * `PdfItem.bold_source` when the FontDescriptor ForceBold flag or the
+ * embedded program's bold selection said bold.
+ */
+#define PDF_BOLD_FONT_FLAGS 2
+
+/**
+ * `PdfItem.bold_source` when `bold_from_weight` credited the weight class.
+ */
+#define PDF_BOLD_WEIGHT_CLASS 3
+
+/**
+ * `PdfItem.bold_source` when the run was filled and stroked to look heavier.
+ */
+#define PDF_BOLD_PAINTED 4
+
+/**
+ * `PdfItem.fixed_pitch` when the face does not declare or measure a pitch.
+ */
+#define PDF_PITCH_UNKNOWN 0
+
+/**
+ * `PdfItem.fixed_pitch` when the face is monospaced.
+ */
+#define PDF_PITCH_FIXED 1
+
+/**
+ * `PdfItem.fixed_pitch` when the face is proportional.
+ */
+#define PDF_PITCH_PROPORTIONAL 2
+
 #define PDF_CAP_RENDER 1
 
 #define PDF_CAP_OCR 2
@@ -368,7 +405,9 @@ typedef struct {
  * Initialize with pdf_inspector_request_init. Empty page selection means all
  * pages. Page lists are sets; query batches preserve input order. `frame`
  * selects the coordinate frame for page dimensions, positioned runs,
- * path geometry, and region rects (see `PDF_FRAME_*`).
+ * path geometry, and region rects (see `PDF_FRAME_*`). `bold_from_weight`
+ * is 0 or 1; `bold_weight_threshold` is the 100..=900 class that option
+ * treats as bold (600 by default).
  */
 typedef struct {
   uint32_t outputs;
@@ -381,6 +420,8 @@ typedef struct {
   PdfTableInputs tables;
   PdfOcrPageInputs external_ocr;
   uint32_t frame;
+  uint32_t bold_from_weight;
+  uint32_t bold_weight_threshold;
 } PdfRequest;
 
 typedef struct {
@@ -399,6 +440,9 @@ typedef struct {
  * Complete positioned run. Rotation is clockwise; positive baseline_shift
  * denotes superscript. MCID is meaningful only when PDF_HAS_MCID is set.
  * PDF_LEGACY_SYMBOL_REWRITE is decoding provenance, not an OCR verdict.
+ * `font_weight` is 0 when unknown, else 100..=900. `bold_source` is 0 when
+ * `is_bold` is unset, else `PDF_BOLD_FONT_*` / `PDF_BOLD_PAINTED`.
+ * `fixed_pitch` is `PDF_PITCH_*`.
  */
 typedef struct {
   uint32_t page;
@@ -409,6 +453,9 @@ typedef struct {
   float rotation;
   float baseline_shift;
   int64_t mcid;
+  uint32_t font_weight;
+  uint32_t bold_source;
+  uint32_t fixed_pitch;
   PdfBytes text;
   PdfBytes font;
   PdfBytes font_tag;
