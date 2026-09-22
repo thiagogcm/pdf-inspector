@@ -1,9 +1,10 @@
+use super::content::PageContent;
+use super::frames::PageFrame;
 use super::input::*;
-use super::output::{flip_box, flip_point, narrow, orientation, page_box, sheet_page_info};
+use super::output::{flip_box, flip_point, narrow, orientation};
 use super::*;
 use lopdf::Document;
 
-use pdf_inspector::extractor::PageFrameInfo;
 use pdf_inspector::vision::{
     FusedPageMarkdown, ImagePoint, ImageQuad, ModelIdentity, OcrPage, OcrRun, OcrSpan,
     PageContentSource, PageTransform, RenderPixelFormat, RenderedPage, RoutedOcrPage,
@@ -14,17 +15,20 @@ use pdf_inspector::{
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Instant;
 
-/// Immutable, decrypted document bytes plus per-page frames cached at open.
-/// All processing runs the core's byte-oriented API against `bytes`.
+/// Immutable document bytes (decrypted once when a password opened them)
+/// plus per-page frames cached at open. Processing runs the core's
+/// byte-oriented API against `bytes`; the core re-applies its load repairs on
+/// every parse, so only decryption has to be written back.
 pub(super) struct DocumentState {
     bytes: Vec<u8>,
-    frames: Vec<PageFrameInfo>,
+    frames: Vec<PageFrame>,
     pub(super) info: PdfDocumentInfo,
     /// Backs `info.pages`.
     _storage: Storage,
 }
 impl DocumentState {
     pub(super) fn open(bytes: Vec<u8>, password: Option<&str>) -> Fallible<Self> {
+        let leading_bytes = pdf_inspector::pdf_header_offset(&bytes).unwrap_or(0);
         let (mut doc, _, repairs) =
             pdf_inspector::load_document_from_mem_with_repairs(&bytes, password)?;
         // Later operations reparse the bytes without a password, so a source
@@ -37,11 +41,8 @@ impl DocumentState {
         if encrypted {
             flags |= PDF_LOAD_DECRYPTED;
         }
-        if repairs.leading_bytes > 0 {
+        if leading_bytes > 0 {
             flags |= PDF_LOAD_LEADING_BYTES;
-        }
-        if repairs.container_repaired {
-            flags |= PDF_LOAD_CONTAINER_REPAIRED;
         }
         if repairs.widened_form_bboxes > 0 {
             flags |= PDF_LOAD_WIDENED_FORM_BBOX;
@@ -49,6 +50,7 @@ impl DocumentState {
         if repairs.saturated_bbox_numerals > 0 {
             flags |= PDF_LOAD_SATURATED_BBOX;
         }
+        let frames = PageFrame::all(&doc);
         let bytes = if encrypted {
             doc.encryption_state = None;
             doc.trailer.remove(b"Encrypt");
@@ -61,38 +63,16 @@ impl DocumentState {
         } else {
             bytes
         };
-        // Keep every load repair in the reusable byte representation. A later
-        // C call reparses these bytes without the original password; leaving
-        // saturated numerals or repaired containers behind would reintroduce
-        // the original loss on the next operation.
-        let bytes = if !encrypted
-            && (repairs.container_repaired
-                || repairs.widened_form_bboxes > 0
-                || repairs.saturated_bbox_numerals > 0)
-        {
-            let mut repaired = Vec::new();
-            doc.save_to(&mut repaired).map_err(|e| {
-                Failure::parse(format!("could not serialize repaired document: {e}"))
-            })?;
-            repaired
-        } else {
-            bytes
-        };
-        // Frames come from the tested core helper on the final (decrypted
-        // and form-repaired) bytes, one per page in order, so encrypted
-        // sources do not need a password here and page N is `frames[N-1]`.
-        let frames =
-            pdf_inspector::extractor::page_frame_info_mem(&bytes).map_err(Failure::from)?;
         let storage = Storage::default();
         let info = PdfDocumentInfo {
             page_count: narrow(frames.len()),
             audit: PdfLoadAudit {
                 flags,
-                leading_bytes: narrow(repairs.leading_bytes),
+                leading_bytes: narrow(leading_bytes),
                 widened_form_bboxes: narrow(repairs.widened_form_bboxes),
                 saturated_bbox_numerals: narrow(repairs.saturated_bbox_numerals),
             },
-            pages: storage.slice(frames.iter().map(sheet_page_info)),
+            pages: storage.slice(frames.iter().map(|f| f.info(PositionFrame::Sheet))),
         };
         Ok(Self {
             bytes,
@@ -107,20 +87,10 @@ impl DocumentState {
     fn document(&self) -> Fallible<Document> {
         Ok(pdf_inspector::load_document_from_mem_with_password(&self.bytes, None)?.0)
     }
-    pub(super) fn frame_info(&self, page: u32) -> Fallible<PageFrameInfo> {
+    pub(super) fn frame(&self, page: u32) -> Fallible<&PageFrame> {
         page.checked_sub(1)
             .and_then(|i| self.frames.get(i as usize))
-            .copied()
             .ok_or_else(|| Failure::invalid(format!("page {page} is outside 1..={}", self.count())))
-    }
-    fn page_info(&self, page: u32, frame: PositionFrame) -> Fallible<PdfPageInfo> {
-        let info = self.frame_info(page)?;
-        let mut view = sheet_page_info(&info);
-        if frame == PositionFrame::Display {
-            view.width = info.display_width;
-            view.height = info.display_height;
-        }
-        Ok(view)
     }
 }
 
@@ -131,13 +101,13 @@ const ALL_OUTPUTS: u32 = PDF_OUT_INSPECTION
     | PDF_OUT_STRUCTURE
     | PDF_OUT_GEOMETRY
     | PDF_OUT_RENDER
-    | PDF_OUT_ANALYSIS
-    | PDF_OUT_TABLES;
+    | PDF_OUT_ANALYSIS;
 
 pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<ResultOwner> {
     let started = Instant::now();
     reserved(r.outputs, ALL_OUTPUTS, "output flags")?;
     let position = position_options(r)?;
+    let extraction = text_extraction_options(r)?;
     let frame = position.frame;
     let selected = pages(r.pages, state.count())?;
     let md = markdown(&r.markdown)?;
@@ -168,15 +138,14 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     let tables = slice(r.tables.ptr, r.tables.len)?;
     let table_inputs = tables
         .iter()
-        .map(|t| table_input(t, state.count()))
+        .map(|t| super::tables::table_input(t, state.count()))
         .collect::<Fallible<Vec<_>>>()?;
     let external = slice(r.external_ocr.ptr, r.external_ocr.len)?;
     let external_run = external_run(external, state, &selected)?;
     let external_pages = external.iter().map(|p| p.page).collect::<HashSet<_>>();
     let config = detection(r.detection, state.count())?;
     let ocr_on = r.ocr.mode != PDF_OCR_OFF;
-    let want_frame_content = r.outputs & (PDF_OUT_TEXT | PDF_OUT_ITEMS | PDF_OUT_GEOMETRY) != 0;
-    let want_raw_content = r.outputs & PDF_OUT_TABLES != 0;
+    let want_content = r.outputs & (PDF_OUT_TEXT | PDF_OUT_ITEMS | PDF_OUT_GEOMETRY) != 0;
     let want_pages = r.outputs & (PDF_OUT_MARKDOWN | PDF_OUT_ANALYSIS) != 0 || !external.is_empty();
 
     // 1. Classification. Per-page analysis and Markdown come from the
@@ -263,48 +232,28 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         }
     }
 
-    // 5. Positioned content, structure, and rendering. Frame content arrives
-    // y-up in the request frame from tested core helpers; raw user-space
-    // content stays on the detector path where the pipeline expects it.
-    let content = if want_frame_content {
-        let set = selected.iter().copied().collect::<HashSet<_>>();
-        Some(
-            pdf_inspector::extractor::extract_positioned_page_content_mem_in_frame(
-                &state.bytes,
-                Some(&set),
-                position,
-            )?,
-        )
+    // 5. Positioned content, structure, and rendering. One parse of the
+    // selected pages in the sheet frame; TEXT lines are grouped there so the
+    // frame governs geometry, not line breaks, before geometry moves to the
+    // display frame when requested.
+    let doc = if want_content || r.outputs & (PDF_OUT_STRUCTURE | PDF_OUT_ITEMS) != 0 {
+        Some(state.document()?)
     } else {
         None
     };
-    // TEXT grouping is pinned to the sheet frame so the frame governs geometry,
-    // not line breaks. Only parsed when display text is requested.
-    let sheet_content = if r.outputs & PDF_OUT_TEXT != 0 && frame == PositionFrame::Display {
+    let mut content: Option<PageContent> = None;
+    let mut sheet_text: BTreeMap<u32, String> = BTreeMap::new();
+    if let (Some(doc), true) = (&doc, want_content) {
         let set = selected.iter().copied().collect::<HashSet<_>>();
-        Some(
-            pdf_inspector::extractor::extract_positioned_page_content_mem_in_frame(
-                &state.bytes,
-                Some(&set),
-                position.frame(PositionFrame::Sheet),
-            )?,
-        )
-    } else {
-        None
-    };
-    let raw_content = if want_raw_content {
-        let set = selected.iter().copied().collect::<HashSet<_>>();
-        Some(
-            pdf_inspector::extractor::extract_positioned_page_content_mem(
-                &state.bytes,
-                Some(&set),
-                position,
-            )?,
-        )
-    } else {
-        None
-    };
-    if let Some(parsed) = content.as_ref().or(raw_content.as_ref()) {
+        let mut parsed = super::content::parse(doc, &set, extraction)?;
+        if r.outputs & PDF_OUT_TEXT != 0 {
+            for number in &selected {
+                sheet_text.insert(*number, plain_text(&parsed.items, *number));
+            }
+        }
+        if frame == PositionFrame::Display {
+            parsed.move_to_display(doc, &state.frames);
+        }
         view.cmap_gaps = storage.slice(parsed.cmap_gaps.iter().map(|gap| PdfCMapGap {
             font: storage.bytes(&gap.font),
             codes: gap.codes,
@@ -314,12 +263,8 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         if parsed.cmap_gaps.iter().any(|gap| gap.unmapped > 0) {
             view.flags |= PDF_DOC_ENCODING_ISSUES;
         }
+        content = Some(parsed);
     }
-    let doc = if r.outputs & (PDF_OUT_STRUCTURE | PDF_OUT_TABLES | PDF_OUT_ITEMS) != 0 {
-        Some(state.document()?)
-    } else {
-        None
-    };
     let elements = if r.outputs & PDF_OUT_STRUCTURE != 0 {
         pdf_inspector::extract_structure_elements_mem(&state.bytes, Some(&selected))?
     } else {
@@ -345,19 +290,12 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     let mut markdown_parts = Vec::new();
     let mut text_parts = Vec::new();
     for number in &selected {
-        let frame_info = state.frame_info(*number)?;
-        let frame_height = match frame {
-            PositionFrame::Sheet => frame_info.sheet_height,
-            PositionFrame::Display => frame_info.display_height,
-        };
-        let info = state.page_info(*number, frame)?;
+        let page_frame = state.frame(*number)?;
+        let frame_height = page_frame.height(frame);
         #[cfg(feature = "render-pdfium")]
-        let (render_x0, render_y1) = (
-            frame_info.sheet_x0,
-            frame_info.sheet_y0 + frame_info.sheet_height,
-        );
+        let (render_x0, render_y1) = (page_frame.sheet.x0, page_frame.sheet.y1);
         let mut p = PdfPage {
-            info,
+            info: page_frame.info(frame),
             ..PdfPage::default()
         };
         let native_page = native
@@ -441,16 +379,13 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             p.markdown = storage.bytes(page_md);
             markdown_parts.push((*number, page_md.to_owned()));
         }
-        let page_items = content
-            .as_ref()
-            .map(|c| {
-                c.items
-                    .iter()
-                    .filter(|i| i.page == *number)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         if let Some(content) = &content {
+            let page_items = content
+                .items
+                .iter()
+                .filter(|i| i.page == *number)
+                .cloned()
+                .collect::<Vec<pdf_inspector::TextItem>>();
             if r.outputs & PDF_OUT_ITEMS != 0 {
                 p.items = storage.slice(
                     page_items
@@ -464,39 +399,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
                         ),
                 );
             }
-            if r.outputs & PDF_OUT_TEXT != 0 {
-                // TEXT stays on the sheet frame so the frame governs geometry,
-                // not line breaks.
-                let text_items = if frame == PositionFrame::Display {
-                    sheet_content
-                        .as_ref()
-                        .map(|sheet| {
-                            sheet
-                                .items
-                                .iter()
-                                .filter(|i| i.page == *number)
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_else(|| page_items.clone())
-                } else {
-                    page_items.clone()
-                };
-                let text = pdf_inspector::extractor::group_into_lines_preserving_all_text(
-                    text_items.iter().map(|i| (*i).clone()).collect(),
-                )
-                .into_iter()
-                .map(|mut line| {
-                    for item in &mut line.items {
-                        item.is_bold = false;
-                        item.is_italic = false;
-                        item.is_underline = false;
-                        item.is_strikeout = false;
-                        item.baseline_shift = 0.0;
-                    }
-                    line.text()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            if let Some(text) = sheet_text.remove(number) {
                 p.text = storage.bytes(&text);
                 text_parts.push(text);
             }
@@ -520,17 +423,8 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             if content.gid_pages.contains(number) {
                 p.flags |= PDF_PAGE_GID_ENCODED;
             }
-            if content.skipped_invisible.contains(number) {
-                p.flags |= PDF_PAGE_SKIPPED_INVISIBLE;
-            }
             let has_table = p.flags & PDF_PAGE_HAS_TABLES != 0;
-            // Both detectors filter by page, so hand them only this page's items.
-            let page_owned = page_items
-                .iter()
-                .map(|i| (*i).clone())
-                .collect::<Vec<pdf_inspector::TextItem>>();
-            let (columns, newspaper) =
-                pdf_inspector::extractor::page_column_layout(&page_owned, *number, has_table);
+            let (columns, newspaper) = super::layout::page_columns(&page_items, *number, has_table);
             if columns.len() < 2 {
                 p.reading_order = PDF_READING_SINGLE;
             } else {
@@ -546,43 +440,13 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
                 x1: x0.max(x1),
             }));
             p.charts = storage.slice(
-                pdf_inspector::tables::detect_chart_regions(&page_owned, &content.rects, *number)
+                pdf_inspector::tables::detect_chart_regions(&page_items, &content.rects, *number)
                     .into_iter()
                     .map(|(x, y, w, h)| flip_box(x, y, w, h, frame_height)),
             );
-            p.image_regions = storage.slice(
-                page_items
-                    .iter()
-                    .filter_map(|item| image_region_box(item, frame_height)),
-            );
-        }
-        // Either positioned pass parses the same content streams; the core
-        // records only turned pages, so absence means upright.
-        if let Some(parsed) = content.as_ref().or(raw_content.as_ref()) {
-            let turned = parsed.rotations.get(number).copied();
+            // The core records only turned pages; absence means upright.
+            let turned = content.rotations.get(number).copied();
             p.text_orientation = orientation(turned.unwrap_or(PageRotation::Upright));
-        }
-        if r.outputs
-            & (PDF_OUT_ITEMS
-                | PDF_OUT_GEOMETRY
-                | PDF_OUT_TEXT
-                | PDF_OUT_MARKDOWN
-                | PDF_OUT_ANALYSIS)
-            != 0
-        {
-            let item_text = page_items
-                .iter()
-                .filter(|i| matches!(i.item_type, pdf_inspector::types::ItemType::Text))
-                .map(|i| i.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let quality_text = if item_text.trim().is_empty() {
-                page_md
-            } else {
-                item_text.as_str()
-            };
-            p.quality =
-                super::output::quality_view(pdf_inspector::text_quality_metrics(quality_text));
         }
         if r.outputs & PDF_OUT_STRUCTURE != 0 {
             p.structure = storage.slice(elements.iter().filter(|e| e.page == *number).map(|e| {
@@ -611,36 +475,15 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     }
     let region_views = region_queries(&storage, state, regions, position)?;
     view.regions = storage.slice(region_views);
-    let mut table_views = match (&raw_content, r.outputs & PDF_OUT_TABLES != 0) {
-        (Some(content), true) => super::tables::detect(
-            &storage,
-            content,
-            doc.as_ref(),
-            &selected,
-            state,
-            md.clone(),
-            frame,
-        ),
-        _ => Vec::new(),
-    };
     if !tables.is_empty() {
-        view.present |= PDF_OUT_TABLES;
-        table_views.extend(hinted_tables(&storage, state, tables, table_inputs)?);
-    }
-    for table in &table_views {
-        if table.flags & PDF_TABLE_FROM_HINT == 0 {
-            if let Some(page) = page_views
-                .iter_mut()
-                .find(|page| page.info.page == table.page)
-            {
-                page.flags |= PDF_PAGE_HAS_TABLES;
-            }
-        }
+        view.tables = storage.slice(super::tables::hinted_tables(
+            &storage,
+            &state.bytes,
+            tables,
+            table_inputs,
+        )?);
     }
     view.pages = storage.slice(page_views);
-    if view.present & PDF_OUT_TABLES != 0 {
-        view.tables = storage.slice(table_views);
-    }
     if let (Some(doc), true) = (&doc, r.outputs & PDF_OUT_STRUCTURE != 0) {
         view.structure_nodes = super::semantic::nodes(&storage, doc, &selected);
     }
@@ -710,9 +553,25 @@ unsafe fn native_ocr(
 ) -> Fallible<OcrOutcome> {
     Ok(OcrOutcome::default())
 }
-fn image_region_box(item: &pdf_inspector::TextItem, frame_height: f32) -> Option<PdfBox> {
-    pdf_inspector::significant_image_region(item)
-        .map(|r| flip_box(r.x, r.y, r.width, r.height, frame_height))
+/// Plain text of one page's sheet-frame runs, one grouped line per row,
+/// with formatting cleared so `TextLine::text` emits no markup.
+fn plain_text(items: &[pdf_inspector::TextItem], page: u32) -> String {
+    pdf_inspector::extractor::group_into_lines_preserving_all_text(
+        items.iter().filter(|i| i.page == page).cloned().collect(),
+    )
+    .into_iter()
+    .map(|mut line| {
+        for item in &mut line.items {
+            item.is_bold = false;
+            item.is_italic = false;
+            item.is_underline = false;
+            item.is_strikeout = false;
+            item.baseline_shift = 0.0;
+        }
+        line.text()
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 fn garbled(reasons: &[String]) -> bool {
     reasons
@@ -783,143 +642,6 @@ fn provenance(s: &Storage, p: &pdf_inspector::vision::PageProvenance) -> Fallibl
     })
 }
 
-/// Column cap shared with the core table formatter.
-const MAX_TABLE_COLUMNS: usize = 25;
-
-/// Bound caller-supplied TSR structure before the core's lenient parser sees
-/// it: one cell quadrilateral per cell tag, parseable spans, and spans that
-/// cannot make the occupancy grid grow independently of the token count.
-fn validate_structure_tokens(tokens: &[String], cells: usize) -> Fallible<()> {
-    let rows = tokens
-        .iter()
-        .filter(|token| token.trim() == "<tr>")
-        .count()
-        .max(1);
-    let mut cell_tags = 0usize;
-    for token in tokens {
-        let token = token.trim();
-        match token {
-            "<td></td>" | "<th></th>" | "<td" | "<th" => cell_tags += 1,
-            _ => {
-                let (name, limit) = if token.starts_with("rowspan") {
-                    ("rowspan", rows)
-                } else if token.starts_with("colspan") {
-                    ("colspan", MAX_TABLE_COLUMNS)
-                } else {
-                    continue;
-                };
-                let value = token[name.len()..]
-                    .trim()
-                    .strip_prefix('=')
-                    .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\''))
-                    .and_then(|v| v.parse::<usize>().ok());
-                match value {
-                    Some(v) if (1..=limit).contains(&v) => {}
-                    _ => {
-                        return Err(Failure::invalid(format!(
-                            "invalid table structure: {name} must be an integer in 1..={limit}"
-                        )))
-                    }
-                }
-            }
-        }
-    }
-    if cell_tags != cells {
-        return Err(Failure::invalid("table structure and cell count differ"));
-    }
-    Ok(())
-}
-unsafe fn table_input(t: &PdfTableInput, count: u32) -> Fallible<pdf_inspector::TsrTableInput> {
-    page(t.page, count)?;
-    let crop = bounds(t.bounds)?;
-    if t.mode > PDF_TSR_STRICT {
-        return Err(Failure::invalid("invalid TSR mode"));
-    }
-    let tokens = slice(t.tokens.ptr, t.tokens.len)?
-        .iter()
-        .map(|s| text(*s).map(str::to_owned))
-        .collect::<Fallible<Vec<_>>>()?;
-    let cells = slice(t.cells.ptr, t.cells.len)?;
-    validate_structure_tokens(&tokens, cells.len())?;
-    let mut boxes = Vec::new();
-    for cell in cells {
-        validate_quad(*cell)?;
-        boxes.push(
-            cell.points
-                .iter()
-                .flat_map(|p| [p.x - crop[0], p.y - crop[1]])
-                .collect(),
-        );
-    }
-    Ok(pdf_inspector::TsrTableInput {
-        page: t.page - 1,
-        crop_pdf_pt_bbox: crop,
-        render_dpi: 72.0,
-        structure_tokens: tokens,
-        cell_bboxes: boxes,
-    })
-}
-/// Resolve every hinted table with two batched core calls at most.
-fn hinted_tables(
-    storage: &Storage,
-    state: &DocumentState,
-    tables: &[PdfTableInput],
-    inputs: Vec<pdf_inspector::TsrTableInput>,
-) -> Fallible<Vec<PdfTable>> {
-    let cells = pdf_inspector::extract_tables_with_structure_cells_mem(&state.bytes, &inputs)?;
-    let auto_indices = tables
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.mode == PDF_TSR_AUTO)
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    let auto_inputs = auto_indices
-        .iter()
-        .map(|&i| inputs[i].clone())
-        .collect::<Vec<_>>();
-    // Pair repairs with their descriptors by index; a short core answer
-    // then surfaces as a missing entry rather than a misaligned one.
-    let mut auto: BTreeMap<usize, _> = auto_indices
-        .into_iter()
-        .zip(pdf_inspector::extract_tables_with_structure_auto_mem(
-            &state.bytes,
-            &auto_inputs,
-        )?)
-        .collect();
-    if cells.len() != tables.len() || auto.len() != auto_inputs.len() {
-        return Err(Failure::runtime("core answered fewer tables than queried"));
-    }
-    let mut views = Vec::with_capacity(tables.len());
-    for (input_index, (input, cells)) in tables.iter().zip(cells).enumerate() {
-        let (markdown, fallback) = match auto.remove(&input_index) {
-            Some(r) => (r.markdown, r.fallback_reason),
-            None => (pdf_inspector::tables::cells_to_markdown(&cells), None),
-        };
-        // A repaired table's cells no longer describe its Markdown.
-        let resolved = if fallback.is_none() { &cells[..] } else { &[] };
-        views.push(PdfTable {
-            page: input.page,
-            flags: PDF_TABLE_FROM_HINT | PDF_TABLE_HAS_BOUNDS,
-            input_index: narrow(input_index),
-            bounds: input.bounds,
-            markdown: storage.owned(markdown.into_bytes()),
-            fallback_reason: storage.optional(fallback.as_deref()),
-            cells: storage.slice(resolved.iter().map(|c| PdfCell {
-                row: narrow(c.row),
-                column: narrow(c.col),
-                row_span: narrow(c.rowspan),
-                column_span: narrow(c.colspan),
-                flags: (u32::from(c.is_header) * PDF_CELL_HEADER)
-                    | PDF_CELL_HAS_BOUNDS
-                    | PDF_CELL_SPAN_KNOWN,
-                bounds: page_box(c.page_pt_bbox),
-                text: storage.bytes(&c.text),
-            })),
-            ..PdfTable::default()
-        });
-    }
-    Ok(views)
-}
 /// Run text and table region queries as one batched core call per kind and
 /// vector-grid queries individually, preserving descriptor order.
 ///
@@ -1001,23 +723,6 @@ fn region_queries(
     Ok(views)
 }
 
-fn validate_quad(q: PdfQuad) -> Fallible<()> {
-    for p in q.points {
-        finite(p.x, "polygon x")?;
-        finite(p.y, "polygon y")?;
-    }
-    let area = q
-        .points
-        .iter()
-        .zip(q.points.iter().cycle().skip(1))
-        .take(4)
-        .map(|(a, b)| f64::from(a.x) * f64::from(b.y) - f64::from(b.x) * f64::from(a.y))
-        .sum::<f64>();
-    if !area.is_finite() || area.abs() < f64::EPSILON {
-        return Err(Failure::invalid("polygon must have positive area"));
-    }
-    Ok(())
-}
 /// A pixel-free page whose bitmap frame equals the page-point frame at 72 dpi,
 /// so externally supplied page-space quadrilaterals enter the core's fusion
 /// unchanged. The zeroed buffer is never read.
@@ -1071,7 +776,7 @@ unsafe fn external_run(
         };
         let mut spans = Vec::new();
         for s in slice(e.spans.ptr, e.spans.len)? {
-            validate_quad(s.polygon)?;
+            super::tables::validate_quad(s.polygon)?;
             ratio(s.confidence, "OCR span confidence")?;
             if s.flags & !PDF_HAS_ORIENTATION != 0 {
                 return Err(Failure::invalid("unknown OCR span flags"));
@@ -1094,7 +799,7 @@ unsafe fn external_run(
             .collect::<Fallible<Vec<_>>>()?;
         time = time.saturating_add(e.processing_ms);
         pages.push(RoutedOcrPage {
-            rendered: phantom_page(state.page_info(e.page, PositionFrame::Sheet)?)?,
+            rendered: phantom_page(state.frame(e.page)?.info(PositionFrame::Sheet))?,
             ocr: OcrPage {
                 page_number: e.page,
                 spans,

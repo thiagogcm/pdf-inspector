@@ -9,9 +9,7 @@ use crate::markdown::{
     complete_table_markdown_from_items, to_markdown_from_items_with_rects_and_page_count,
     MarkdownOptions,
 };
-use crate::text_quality::{
-    detect_encoding_issues, is_cid_garbage, is_garbage_text, text_quality_metrics,
-};
+use crate::text_quality::{detect_encoding_issues, is_cid_garbage, is_garbage_text};
 use crate::types::{ItemType, PdfRect, TextItem};
 use crate::PageMarkdown;
 
@@ -99,7 +97,6 @@ pub struct FusedPages {
 
 /// Origin of a trustworthy native-text candidate retained for adaptive OCR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
 pub(crate) enum NativeCandidateOrigin {
     /// Text produced by pdf-inspector's normal native extractor.
     Extractor,
@@ -137,14 +134,12 @@ pub(crate) enum OcrFusionRoute {
     FullPage,
     /// The native page is clean; only tables detected inside these image
     /// regions may be appended.
-    #[cfg_attr(not(any(test, feature = "ocr")), allow(dead_code))]
     SupplementalRegions(Vec<PdfRect>),
 }
 
 impl NativeFallbackCandidate {
     /// True when an independent native recovery is substantial enough to
     /// cancel OCR for recoverable font/vector routing reasons.
-    #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
     pub(crate) fn is_complete_recovery(&self) -> bool {
         self.quality.alphanumeric_chars >= 40 && self.quality.score >= 0.68
     }
@@ -153,7 +148,6 @@ impl NativeFallbackCandidate {
         &self.markdown
     }
 
-    #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
     pub(crate) fn is_stronger_than(&self, other: &Self) -> bool {
         self.quality.alphanumeric_chars > other.quality.alphanumeric_chars
             || (self.quality.alphanumeric_chars == other.quality.alphanumeric_chars
@@ -166,7 +160,6 @@ impl NativeFallbackCandidate {
 /// This intentionally uses script-agnostic evidence. A native candidate only
 /// needs to be trustworthy, not necessarily complete: a clean native header
 /// can still be fused with an image-backed OCR body.
-#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
 pub(crate) fn assess_native_candidate(
     markdown: String,
     origin: NativeCandidateOrigin,
@@ -253,7 +246,6 @@ fn full_page_routes(ocr_run: &OcrRun) -> BTreeMap<u32, OcrFusionRoute> {
 }
 
 /// OCR-pipeline fusion with an explicit route mode for every processed page.
-#[cfg_attr(not(any(test, feature = "ocr")), allow(dead_code))]
 pub(crate) fn fuse_ocr_pages_adaptive_with_routes(
     native_pages: &[PageMarkdown],
     ocr_run: &OcrRun,
@@ -561,13 +553,30 @@ fn assess_text_candidate(markdown: &str) -> Option<TextCandidateQuality> {
         return None;
     }
 
-    let metrics = text_quality_metrics(markdown);
-    if metrics.alphanumeric_chars == 0 {
+    let alphanumeric_chars = markdown
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .count();
+    if alphanumeric_chars == 0 {
         return None;
     }
+    let visible_chars = markdown
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count()
+        .max(1);
+    let density = alphanumeric_chars as f32 / visible_chars as f32;
+    let length_score = (alphanumeric_chars as f32 / 160.0).min(1.0);
+    let nonempty_lines = markdown
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        .max(1);
+    let line_score = (alphanumeric_chars as f32 / nonempty_lines as f32 / 12.0).min(1.0);
+    let score = (0.45 + length_score * 0.25 + density * 0.20 + line_score * 0.10).min(1.0);
     Some(TextCandidateQuality {
-        alphanumeric_chars: metrics.alphanumeric_chars as usize,
-        score: metrics.score,
+        alphanumeric_chars,
+        score,
     })
 }
 

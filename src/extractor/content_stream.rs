@@ -345,21 +345,21 @@ impl ActualTextBounds {
 
 /// Switches of one page's text extraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TextExtractionOptions {
+pub struct TextExtractionOptions {
     /// Keep invisible (Tr 3) text instead of skipping it.
-    pub(crate) include_invisible: bool,
+    pub include_invisible: bool,
     /// Read bold from the weight class too — see
     /// `PositionOptions::bold_from_weight`.
-    pub(crate) bold_from_weight: bool,
+    pub bold_from_weight: bool,
     /// The weight class from which `bold_from_weight` reads bold — see
     /// `PositionOptions::bold_weight_threshold`.
-    pub(crate) bold_weight_threshold: u16,
+    pub bold_weight_threshold: u16,
     /// Return, per run, the codes shown through each font's CMap and how
     /// many of them the CMap had no entry for (see `RunCoverage`). Off for
     /// the passes whose caller discards it — the region and position
     /// readers, a document-wide pass gathering folio evidence — which then
     /// neither gather the runs nor sum them.
-    pub(crate) cmap_coverage: bool,
+    pub cmap_coverage: bool,
 }
 
 impl Default for TextExtractionOptions {

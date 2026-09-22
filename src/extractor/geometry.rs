@@ -66,7 +66,7 @@ impl PageRotation {
     /// Undo [`PageRotation::rotate_box`]: take a box expressed in the turned
     /// frame back to the page frame it was turned from. Extents are
     /// normalised the same way, so the result has non-negative extents.
-    pub(crate) fn unrotate_box(self, x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32) {
+    pub fn unrotate_box(self, x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32) {
         let (x0, x1) = (x.min(*x + *width), x.max(*x + *width));
         let (y0, y1) = (y.min(*y + *height), y.max(*y + *height));
         let (new_x, new_y, new_width, new_height) = match self {
