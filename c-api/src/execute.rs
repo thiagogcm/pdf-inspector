@@ -46,6 +46,9 @@ impl DocumentState {
         if repairs.widened_form_bboxes > 0 {
             flags |= PDF_LOAD_WIDENED_FORM_BBOX;
         }
+        if repairs.saturated_bbox_numerals > 0 {
+            flags |= PDF_LOAD_SATURATED_BBOX;
+        }
         let bytes = if encrypted {
             doc.encryption_state = None;
             doc.trailer.remove(b"Encrypt");
@@ -58,11 +61,20 @@ impl DocumentState {
         } else {
             bytes
         };
-        // The loader already counted the widened forms; only a source that
-        // needed widening is re-serialized (encrypted sources were just
-        // serialized from the widened document).
-        let bytes = if repairs.widened_form_bboxes > 0 && !encrypted {
-            pdf_inspector::widen_degenerate_form_bboxes_mem(&bytes)?.unwrap_or(bytes)
+        // Keep every load repair in the reusable byte representation. A later
+        // C call reparses these bytes without the original password; leaving
+        // saturated numerals or repaired containers behind would reintroduce
+        // the original loss on the next operation.
+        let bytes = if !encrypted
+            && (repairs.container_repaired
+                || repairs.widened_form_bboxes > 0
+                || repairs.saturated_bbox_numerals > 0)
+        {
+            let mut repaired = Vec::new();
+            doc.save_to(&mut repaired).map_err(|e| {
+                Failure::parse(format!("could not serialize repaired document: {e}"))
+            })?;
+            repaired
         } else {
             bytes
         };
@@ -78,6 +90,7 @@ impl DocumentState {
                 flags,
                 leading_bytes: narrow(repairs.leading_bytes),
                 widened_form_bboxes: narrow(repairs.widened_form_bboxes),
+                saturated_bbox_numerals: narrow(repairs.saturated_bbox_numerals),
             },
             pages: storage.slice(frames.iter().map(sheet_page_info)),
         };
@@ -291,6 +304,17 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     } else {
         None
     };
+    if let Some(parsed) = content.as_ref().or(raw_content.as_ref()) {
+        view.cmap_gaps = storage.slice(parsed.cmap_gaps.iter().map(|gap| PdfCMapGap {
+            font: storage.bytes(&gap.font),
+            codes: gap.codes,
+            interpolated: gap.interpolated,
+            unmapped: gap.unmapped,
+        }));
+        if parsed.cmap_gaps.iter().any(|gap| gap.unmapped > 0) {
+            view.flags |= PDF_DOC_ENCODING_ISSUES;
+        }
+    }
     let doc = if r.outputs & (PDF_OUT_STRUCTURE | PDF_OUT_TABLES | PDF_OUT_ITEMS) != 0 {
         Some(state.document()?)
     } else {

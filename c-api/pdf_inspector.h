@@ -304,6 +304,8 @@
 
 #define PDF_LOAD_CONTAINER_REPAIRED 8
 
+#define PDF_LOAD_SATURATED_BBOX 16
+
 /**
  * `PdfTable.kind`.
  */
@@ -577,12 +579,14 @@ typedef struct {
 } PdfSource;
 
 /**
- * Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset.
+ * Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset;
+ * `saturated_bbox_numerals` counts `/BBox` numerals repaired before parsing.
  */
 typedef struct {
   uint32_t flags;
   uint32_t leading_bytes;
   uint32_t widened_form_bboxes;
+  uint32_t saturated_bbox_numerals;
 } PdfLoadAudit;
 
 typedef struct {
@@ -865,10 +869,28 @@ typedef struct {
 } PdfStructureNodes;
 
 /**
+ * ToUnicode/CMap coverage observed while decoding positioned content.
+ * `interpolated` codes were recovered from a one-code gap; `unmapped`
+ * codes could not be decoded.
+ */
+typedef struct {
+  PdfBytes font;
+  uint32_t codes;
+  uint32_t interpolated;
+  uint32_t unmapped;
+} PdfCMapGap;
+
+typedef struct {
+  const PdfCMapGap *ptr;
+  size_t len;
+} PdfCMapGaps;
+
+/**
  * One immutable graph of records, published by pointer and released only
  * with pdf_inspector_result_free. Nested storage lasts as long as the
  * result, independently of the source document. `flags` are `PDF_DOC_*`;
- * `pages_sampled` and `pages_with_text` come from detector inspection.
+ * `pages_sampled` and `pages_with_text` come from detector inspection;
+ * `cmap_gaps` is populated when positioned content is parsed.
  */
 typedef struct {
   uint32_t present;
@@ -886,6 +908,7 @@ typedef struct {
   PdfRegions regions;
   PdfTables tables;
   PdfStructureNodes structure_nodes;
+  PdfCMapGaps cmap_gaps;
 } PdfResult;
 
 /**

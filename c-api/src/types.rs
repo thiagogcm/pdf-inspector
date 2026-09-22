@@ -139,6 +139,7 @@ pub const PDF_LOAD_DECRYPTED: u32 = 1;
 pub const PDF_LOAD_WIDENED_FORM_BBOX: u32 = 2;
 pub const PDF_LOAD_LEADING_BYTES: u32 = 4;
 pub const PDF_LOAD_CONTAINER_REPAIRED: u32 = 8;
+pub const PDF_LOAD_SATURATED_BBOX: u32 = 16;
 /// `PdfTable.kind`.
 pub const PDF_TABLE_DATA: u32 = 0;
 pub const PDF_TABLE_TOC: u32 = 1;
@@ -475,13 +476,26 @@ pub struct PdfInterval {
     pub x0: f32,
     pub x1: f32,
 }
-/// Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset.
+/// Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset;
+/// `saturated_bbox_numerals` counts `/BBox` numerals repaired before parsing.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfLoadAudit {
     pub flags: u32,
     pub leading_bytes: u32,
     pub widened_form_bboxes: u32,
+    pub saturated_bbox_numerals: u32,
+}
+/// ToUnicode/CMap coverage observed while decoding positioned content.
+/// `interpolated` codes were recovered from a one-code gap; `unmapped`
+/// codes could not be decoded.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfCMapGap {
+    pub font: PdfBytes,
+    pub codes: u32,
+    pub interpolated: u32,
+    pub unmapped: u32,
 }
 /// `reading_order` is `PDF_READING_*`; `text_orientation` is
 /// `PDF_ORIENTATION_*`, assessed whenever positioned content is parsed
@@ -553,7 +567,8 @@ pub struct PdfTable {
 /// One immutable graph of records, published by pointer and released only
 /// with pdf_inspector_result_free. Nested storage lasts as long as the
 /// result, independently of the source document. `flags` are `PDF_DOC_*`;
-/// `pages_sampled` and `pages_with_text` come from detector inspection.
+/// `pages_sampled` and `pages_with_text` come from detector inspection;
+/// `cmap_gaps` is populated when positioned content is parsed.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfResult {
@@ -572,6 +587,7 @@ pub struct PdfResult {
     pub regions: PdfRegions,
     pub tables: PdfTables,
     pub structure_nodes: PdfStructureNodes,
+    pub cmap_gaps: PdfCMapGaps,
 }
 /// Published by pointer for a failed call; release with pdf_inspector_error_free.
 #[repr(C)]
@@ -726,6 +742,12 @@ pub struct PdfCells {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfStructureNodes {
     pub ptr: *const PdfStructureNode,
+    pub len: usize,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfCMapGaps {
+    pub ptr: *const PdfCMapGap,
     pub len: usize,
 }
 #[repr(C)]
