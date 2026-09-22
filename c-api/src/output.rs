@@ -40,6 +40,7 @@ c_slices! {
     PdfCells => PdfCell;
     PdfStructureNodes => PdfStructureNode;
     PdfContentReferences => PdfContentReference;
+    PdfCMapGaps => PdfCMapGap;
 }
 impl Storage {
     pub(super) fn bytes(&self, bytes: impl AsRef<[u8]>) -> PdfBytes {

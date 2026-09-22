@@ -491,6 +491,64 @@ endbfchar endcmap CMapName currentdict /CMap defineresource pop end end
     doc
 }
 
+fn cmap_gap_pdf() -> lopdf::Document {
+    use lopdf::{dictionary, Document, Stream};
+    let mut doc = Document::with_version("1.5");
+    let pages = doc.new_object_id();
+    let cmap = doc.add_object(Stream::new(
+        dictionary! {},
+        br#"
+/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+/CMapName /GapMap def /CMapType 2 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+2 beginbfchar <0041> <0041> <0043> <0043> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end
+"#
+        .to_vec(),
+    ));
+    let cid_font = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "CIDFontType0", "BaseFont" => "GapFace",
+        "CIDSystemInfo" => dictionary! { "Registry" => "Adobe", "Ordering" => "Identity", "Supplement" => 0 },
+        "DW" => 600,
+    });
+    let font = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "GapFace",
+        "Encoding" => "Identity-H", "DescendantFonts" => vec![cid_font.into()],
+        "ToUnicode" => cmap,
+    });
+    let stream = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 10 Tf 50 300 Td (\0A\0B\0C\0D) Tj ET".to_vec(),
+    ));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages,
+        "MediaBox" => vec![0.into(), 0.into(), 600.into(), 400.into()],
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+        "Contents" => stream,
+    });
+    doc.objects.insert(
+        pages,
+        dictionary! { "Type" => "Pages", "Count" => 1, "Kids" => vec![page.into()] }.into(),
+    );
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    doc.trailer.set("Root", catalog);
+    doc
+}
+
+#[test]
+fn positioned_results_forward_upstream_cmap_gap_coverage() {
+    let doc = open(cmap_gap_pdf());
+    let mut request = input::default_request();
+    request.outputs = PDF_OUT_ITEMS;
+    let result = doc.run(&request);
+    let gaps = unsafe { input::slice(result.get().cmap_gaps.ptr, result.get().cmap_gaps.len).unwrap() };
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].codes, 4);
+    assert_eq!(gaps[0].interpolated, 1);
+    assert_eq!(gaps[0].unmapped, 1);
+    assert_ne!(result.get().flags & PDF_DOC_ENCODING_ISSUES, 0);
+}
+
 #[test]
 fn legacy_symbol_rewrite_is_item_flag_and_survives_composition() {
     let doc = open(symbol_rewrite_pdf());
@@ -1440,12 +1498,13 @@ fn emit_c_layout_contract() {
     record!(PdfProvenance; source, flags, confidence, render_dpi, render_ms, ocr_ms, assembly_ms, model, model_revision, warnings);
     record!(PdfPageQuality; alphanumeric_chars, visible_chars, density, replacement_chars, longest_replacement_run, english_cosine, score);
     record!(PdfInterval; x0, x1);
-    record!(PdfLoadAudit; flags, leading_bytes, widened_form_bboxes);
+    record!(PdfLoadAudit; flags, leading_bytes, widened_form_bboxes, saturated_bbox_numerals);
+    record!(PdfCMapGap; font, codes, interpolated, unmapped);
     record!(PdfPage; info, flags, reading_order, text_orientation, quality, markdown, text, ocr_reasons, items, columns, charts, image_regions, structure, rectangles, lines, image, provenance);
     record!(PdfCell; row, column, row_span, column_span, flags, bounds, text);
     record!(PdfRegion; page, kind, flags, bounds, text, ocr_reason, tokens, cells);
     record!(PdfTable; page, flags, input_index, kind, bounds, markdown, fallback_reason, column_edges, row_edges, cells);
-    record!(PdfResult; present, pdf_type, page_count, confidence, flags, pages_sampled, pages_with_text, processing_ms, title, markdown, text, pages, regions, tables, structure_nodes);
+    record!(PdfResult; present, pdf_type, page_count, confidence, flags, pages_sampled, pages_with_text, processing_ms, title, markdown, text, pages, regions, tables, structure_nodes, cmap_gaps);
     record!(PdfError; status, message);
     record!(PdfDocumentInfo; page_count, audit, pages);
     record!(PdfPageNumbers; ptr, len);
@@ -1469,4 +1528,5 @@ fn emit_c_layout_contract() {
     record!(PdfCells; ptr, len);
     record!(PdfStructureNodes; ptr, len);
     record!(PdfContentReferences; ptr, len);
+    record!(PdfCMapGaps; ptr, len);
 }

@@ -33,7 +33,8 @@ The adapter runs the core's byte-oriented public API, exactly as the Node and Py
 | `validate_pdf_bytes`, `load_document_from_mem_with_password`, `load_document_from_mem_with_repairs` | visibility | Open validates and decrypts once with the core loader and records load repairs |
 | `extractor::{visible_page_box, PageBox}` | visibility | Page dimensions and the coordinate frame every view is converted into |
 | `extract_pages_markdown_mem_with_options` | additive wrapper | Per-page Markdown with a password and the request's Markdown options |
-| `extractor::extract_positioned_page_content_mem` | additive wrapper | Items, rectangles, lines, thresholds, rotations, gid pages, and skipped-invisible pages from one parse, with `PositionOptions` |
+| `extractor::extract_positioned_page_content_mem` | additive wrapper | Items, rectangles, lines, thresholds, rotations, gid pages, skipped-invisible pages, and upstream CMap gaps from one parse, with `PositionOptions` |
+| `extractor::PositionedPageContent.cmap_gaps` | additive data | Upstream per-font ToUnicode/CMap coverage gaps for positioned C-API extraction |
 | `extractor::page_column_layout` | additive wrapper | Column x-intervals and newspaper vs tabular reading order |
 | `markdown::{MarkdownDocumentContext, to_markdown_from_items_with_rects_and_lines}` | visibility | Role-aware composition without a document |
 | `markdown::detect_tables_from_items` | additive output mode | Logical tables including TOCs, with detector row/column bands |
@@ -99,9 +100,9 @@ int main(int argc, char **argv) {
 }
 ```
 
-`PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfSource.password` supplies a UTF-8 password; an absent password (NULL pointer) uses the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it. Form XObjects whose `/BBox` has no area are widened the same way the core loader repairs them, so later rendering and OCR see the repaired bytes.
+`PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfSource.password` supplies a UTF-8 password; an absent password (NULL pointer) uses the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it. Form XObjects whose `/BBox` has no area are widened, and overlong `/BBox` numerals are saturated, the same way the core loader repairs them, so later rendering and OCR see the repaired bytes.
 
-`pdf_inspector_document_info` borrows the facts recorded at open: `page_count`, every page's sheet-frame dimensions and `/Rotate` in `pages`, and the load `audit` (decryption, leading bytes before `%PDF-`, container/xref rebuilds, widened form `/BBox` counts). The pointer stays valid until `pdf_inspector_document_free`. `pdf_inspector_version` returns the library version as static UTF-8.
+`pdf_inspector_document_info` borrows the facts recorded at open: `page_count`, every page's sheet-frame dimensions and `/Rotate` in `pages`, and the load `audit` (decryption, leading bytes before `%PDF-`, container/xref rebuilds, widened form `/BBox` counts, and saturated `/BBox` numeral counts). The pointer stays valid until `pdf_inspector_document_free`. `pdf_inspector_version` returns the library version as static UTF-8.
 
 Initialize requests with `pdf_inspector_request_init`. NULL requests have the same defaults: all pages, inspection and document/page Markdown, upstream formatting and detection defaults, OCR off, the sheet coordinate frame, no `PDF_REQUEST_*` flags, and a bold weight threshold of 600. A page list is a set: numbers are 1-based, validated against the document, deduplicated, and returned in document order. An empty selection means all pages. The detector has its own optional page selection.
 
@@ -121,6 +122,8 @@ Initialize requests with `pdf_inspector_request_init`. NULL requests have the sa
 
 Inspection accompanies every execution. Native text/items preserve the PDF's extraction evidence. Page provenance describes final Markdown. Page flags distinguish native OCR recommendations, actual recognition, native recovery (`PDF_PAGE_NATIVE_RECOVERED`: recommended for OCR but not routed), tables, columns, gid-encoded fonts, skipped invisible text, and hosted-processing recommendations. `reading_order` is `PDF_READING_SINGLE`, `PDF_READING_TABULAR`, or `PDF_READING_NEWSPAPER`. `text_orientation` is `PDF_ORIENTATION_UNKNOWN` until positioned content is parsed (items, text, geometry, or tables), then `PDF_ORIENTATION_UPRIGHT`, or `PDF_ORIENTATION_CCW` / `PDF_ORIENTATION_CW` for pages whose text operators predominantly read bottom-to-top / top-to-bottom. `PdfPage.quality` carries native-layer counts and the same 0–1 score OCR fusion uses for a native candidate, filled when items, geometry, text, Markdown, or analysis already ran. `PDF_DOC_OCR_RECOMMENDED` is the detector's document-level OCR advice and is not the same as per-page `PDF_PAGE_NEEDS_OCR`. Table flags incorporate tables found in final OCR Markdown as well as native layout evidence.
 
+When positioned content is parsed, `result.cmap_gaps` reports each font whose upstream ToUnicode/CMap coverage had gaps. `codes` counts shown codes, `interpolated` counts one-code gaps recovered from neighboring mappings, and `unmapped` counts codes left undecoded. Any unmapped code sets `PDF_DOC_ENCODING_ISSUES`; an empty collection means no gap was observed in the parsed content, not that no text was requested.
+
 Without `PDF_REQUEST_INCLUDE_INVISIBLE`, pages that dropped Tr-mode-3 text set `PDF_PAGE_SKIPPED_INVISIBLE`; those runs are recovered by setting the flag and executing again.
 
 `PDF_OUT_ANALYSIS` is also marked present when Markdown or OCR processing requires it. When absent, unset layout/quality flags mean unassessed, not a clean bill of health. `PDF_PAGE_ENCODING_ISSUES` identifies pages whose OCR reasons report suspected garbled text; `PDF_DOC_ENCODING_ISSUES` aggregates selected pages. Analysis-only requests publish neither Markdown nor text. Native quality numbers (`PdfPageQuality`) are filled when items, text, Markdown, geometry, or analysis are requested.
@@ -137,6 +140,7 @@ PdfResult (published pointer)
 +-- regions[]
 +-- tables[] -> cells[]
 +-- structure_nodes[] -> content references[]
++-- cmap_gaps[] -> per-font CMap coverage
 ```
 
 `present` contains the available requested projections. NULL views denote absence; non-NULL views with length zero denote present empty data. Strings are UTF-8, are not NUL-terminated, and can contain embedded NULs. Use their lengths rather than `strlen`. Array lengths are `size_t`; indices, counts, and table row/column positions are `uint32_t` and zero-based; page numbers are always 1-based.

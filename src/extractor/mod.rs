@@ -352,8 +352,14 @@ pub fn extract_text_with_positions_and_rotations_mem_with_options(
     crate::validate_pdf_bytes(buffer)?;
     let (doc, _) = crate::load_document_from_mem(buffer)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
-    let ((mut items, _rects, _lines), _thresholds, _gid_pages, page_rotations, _cmap_coverage, _skipped_invisible) =
-        extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter, options)?;
+    let (
+        (mut items, _rects, _lines),
+        _thresholds,
+        _gid_pages,
+        page_rotations,
+        _cmap_coverage,
+        _skipped_invisible,
+    ) = extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter, options)?;
     if options.frame == PositionFrame::Display {
         display_frame::document_items_to_display_frame(&doc, &mut items, &page_rotations);
     }
@@ -380,6 +386,8 @@ pub struct PositionedPageContent {
     /// 1-indexed pages that skipped invisible (Tr 3) text. Those runs can
     /// be recovered with [`PositionOptions::include_invisible`].
     pub skipped_invisible: HashSet<u32>,
+    /// Per-font ToUnicode/CMap coverage gaps observed in the extracted pages.
+    pub cmap_gaps: Vec<crate::FontCMapGaps>,
 }
 
 /// Extract items, path rectangles, and line segments from a memory buffer in
@@ -394,12 +402,14 @@ pub fn extract_positioned_page_content_mem(
     crate::validate_pdf_bytes(buffer)?;
     let (doc, _) = crate::load_document_from_mem(buffer)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
+    let mut extraction_options = options.text_extraction(options.include_invisible);
+    extraction_options.cmap_coverage = true;
     let ((items, rects, lines), thresholds, gid_pages, rotations, cmap_coverage, skipped_invisible) =
         extract_positioned_text_impl(
             &doc,
             &font_cmaps,
             page_filter,
-            options.text_extraction(options.include_invisible),
+            extraction_options,
             None,
             CoordinateFrame::UserSpace,
         )?;
@@ -411,6 +421,7 @@ pub fn extract_positioned_page_content_mem(
         rotations,
         gid_pages,
         skipped_invisible,
+        cmap_gaps: crate::font_cmap_gaps(cmap_coverage),
     })
 }
 
@@ -470,8 +481,23 @@ pub fn extract_positioned_page_content_mem_in_frame(
     crate::validate_pdf_bytes(buffer)?;
     let (doc, _) = crate::load_document_from_mem(buffer)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
-    let ((mut items, mut rects, mut lines), thresholds, gid_pages, rotations, _cmap_coverage, skipped_invisible) =
-        extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter, options)?;
+    let mut extraction_options = options.text_extraction(options.include_invisible);
+    extraction_options.cmap_coverage = true;
+    let (
+        (mut items, mut rects, mut lines),
+        thresholds,
+        gid_pages,
+        rotations,
+        cmap_coverage,
+        skipped_invisible,
+    ) = extract_positioned_text_impl(
+        &doc,
+        &font_cmaps,
+        page_filter,
+        extraction_options,
+        None,
+        CoordinateFrame::VisiblePageBox,
+    )?;
     if options.frame == PositionFrame::Display {
         display_frame::document_items_to_display_frame(&doc, &mut items, &rotations);
         display_frame::document_rects_lines_to_display_frame(
@@ -486,6 +512,7 @@ pub fn extract_positioned_page_content_mem_in_frame(
         rotations,
         gid_pages,
         skipped_invisible,
+        cmap_gaps: crate::font_cmap_gaps(cmap_coverage),
     })
 }
 
@@ -663,14 +690,15 @@ pub(crate) fn extract_positioned_text_from_doc(
     font_cmaps: &FontCMaps,
     page_filter: Option<&HashSet<u32>>,
 ) -> Result<DocumentExtraction, PdfError> {
-    let (extraction, thresholds, gid, rotations, coverage, _skipped) = extract_positioned_text_impl(
-        doc,
-        font_cmaps,
-        page_filter,
-        TextExtractionOptions::default(),
-        None,
-        CoordinateFrame::UserSpace,
-    )?;
+    let (extraction, thresholds, gid, rotations, coverage, _skipped) =
+        extract_positioned_text_impl(
+            doc,
+            font_cmaps,
+            page_filter,
+            TextExtractionOptions::default(),
+            None,
+            CoordinateFrame::UserSpace,
+        )?;
     Ok((extraction, thresholds, gid, rotations, coverage))
 }
 
@@ -743,12 +771,12 @@ fn extract_positioned_text_with_folio_context_impl(
     let Some(required_pages) = page_filter else {
         let (extraction, thresholds, gid, rotations, coverage, _skipped) =
             extract_positioned_text_impl(
-            doc,
-            font_cmaps,
-            None,
-            options,
-            None,
-            CoordinateFrame::UserSpace,
+                doc,
+                font_cmaps,
+                None,
+                options,
+                None,
+                CoordinateFrame::UserSpace,
             )?;
         return Ok((extraction, thresholds, gid, rotations, coverage));
     };
@@ -827,14 +855,15 @@ pub(crate) fn extract_positioned_text_for_document_analysis(
     font_cmaps: &FontCMaps,
     required_pages: &HashSet<u32>,
 ) -> Result<DocumentExtraction, PdfError> {
-    let (extraction, thresholds, gid, rotations, coverage, _skipped) = extract_positioned_text_impl(
-        doc,
-        font_cmaps,
-        None,
-        TextExtractionOptions::default(),
-        Some(required_pages),
-        CoordinateFrame::UserSpace,
-    )?;
+    let (extraction, thresholds, gid, rotations, coverage, _skipped) =
+        extract_positioned_text_impl(
+            doc,
+            font_cmaps,
+            None,
+            TextExtractionOptions::default(),
+            Some(required_pages),
+            CoordinateFrame::UserSpace,
+        )?;
     Ok((extraction, thresholds, gid, rotations, coverage))
 }
 
