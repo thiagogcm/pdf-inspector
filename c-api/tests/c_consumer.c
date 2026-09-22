@@ -9,7 +9,6 @@ _Static_assert(sizeof(((PdfError *)0)->status) == 4, "status has a fixed width")
 _Static_assert(sizeof(((PdfItem *)0)->mcid) == 8, "MCID has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->dest_page) == 4, "dest_page has a fixed width");
 _Static_assert(sizeof(((PdfLoadAudit *)0)->flags) == 4, "audit flags have a fixed width");
-_Static_assert(sizeof(((PdfPageQuality *)0)->score) == 4, "quality score has a fixed width");
 _Static_assert(sizeof(((PdfCell *)0)->row) == 4, "cell indices have a fixed width");
 
 static PdfBytes bytes(const char *s) {
@@ -57,7 +56,6 @@ int main(void) {
     CHECK((first->present & PDF_OUT_ANALYSIS) && first->structure_nodes.len > 0);
     CHECK(first->structure_nodes.ptr[0].parent == 0);
     CHECK(page->items.ptr[0].bounds.y1 >= page->items.ptr[0].bounds.y0);
-    CHECK(page->quality.visible_chars >= page->quality.alphanumeric_chars);
     CHECK(page->text_orientation == PDF_ORIENTATION_UPRIGHT);
 
     request.markdown.flags &= ~PDF_MD_HEADERS;

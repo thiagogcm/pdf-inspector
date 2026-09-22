@@ -6,7 +6,7 @@ mod base14;
 mod clip_boundaries;
 pub(crate) mod content_decode;
 pub(crate) mod content_stream;
-pub(crate) mod display_frame;
+pub mod display_frame;
 pub(crate) mod fonts;
 pub(crate) mod geometry;
 mod layout;
@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use content_stream::extract_page_text_items_with_options;
-pub(crate) use content_stream::TextExtractionOptions;
+pub use content_stream::TextExtractionOptions;
 pub(crate) use display_frame::DisplayPage;
 pub use display_frame::PositionFrame;
 
@@ -72,10 +72,6 @@ pub struct PositionOptions {
     /// bold. It matters only when `bold_from_weight` is set; a value outside
     /// the scale is clamped into it either way.
     pub bold_weight_threshold: u16,
-    /// Include text drawn with Tr 3 (invisible). Off by default: those runs
-    /// are skipped and pages that dropped them are reported on
-    /// [`PositionedPageContent::skipped_invisible`].
-    pub include_invisible: bool,
 }
 
 impl Default for PositionOptions {
@@ -84,7 +80,6 @@ impl Default for PositionOptions {
             frame: PositionFrame::default(),
             bold_from_weight: false,
             bold_weight_threshold: content_stream::DEFAULT_BOLD_WEIGHT_THRESHOLD,
-            include_invisible: false,
         }
     }
 }
@@ -115,12 +110,6 @@ impl PositionOptions {
         self
     }
 
-    /// Include text drawn with Tr 3 (invisible).
-    pub fn include_invisible(mut self, include_invisible: bool) -> Self {
-        self.include_invisible = include_invisible;
-        self
-    }
-
     /// The content-stream switches these options ask for.
     pub(crate) fn text_extraction(self, include_invisible: bool) -> TextExtractionOptions {
         TextExtractionOptions {
@@ -133,21 +122,21 @@ impl PositionOptions {
     }
 }
 use links::{extract_form_fields, extract_page_links};
-pub(crate) use page_box::{visible_page_box, PageBox};
+pub use page_box::{visible_page_box, PageBox};
 
 // Re-export public types so existing `crate::extractor::X` paths keep working.
 pub use crate::text_utils::{is_bold_font, is_italic_font};
 pub use crate::types::{ItemType, TextLine};
 pub(crate) use fonts::FontStyleCache;
-pub(crate) use layout::detect_columns;
+pub use layout::detect_columns;
 #[cfg(test)]
 use layout::filter_markdown_page_numbers;
 pub(crate) use layout::filter_markdown_page_numbers_with_removed_pages;
 pub(crate) use layout::group_into_lines_with_thresholds;
 pub(crate) use layout::group_prefiltered_items_into_lines_with_thresholds_and_charts;
 pub(crate) use layout::group_prefiltered_items_into_lines_with_thresholds_and_regions;
-pub(crate) use layout::is_newspaper_layout;
-pub(crate) use layout::ColumnRegion;
+pub use layout::is_newspaper_layout;
+pub use layout::ColumnRegion;
 pub use layout::{group_into_lines, group_into_lines_preserving_all_text};
 pub(crate) use scripts::merge_subscript_items;
 pub(crate) use xobjects::FormWalkBudget;
@@ -243,7 +232,7 @@ pub(crate) fn extract_text_with_positions_and_rects_with_password<P: AsRef<Path>
     crate::validate_pdf_file(&path)?;
     let (doc, _) = crate::load_document_from_path_with_password(&path, password)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
-    let (extraction, _thresholds, _gid_pages, _page_rotations, _cmap_coverage, _skipped_invisible) =
+    let (extraction, _thresholds, _gid_pages, _page_rotations, _cmap_coverage) =
         extract_positioned_text_from_doc_in_page_box(
             &doc,
             &font_cmaps,
@@ -352,212 +341,12 @@ pub fn extract_text_with_positions_and_rotations_mem_with_options(
     crate::validate_pdf_bytes(buffer)?;
     let (doc, _) = crate::load_document_from_mem(buffer)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
-    let (
-        (mut items, _rects, _lines),
-        _thresholds,
-        _gid_pages,
-        page_rotations,
-        _cmap_coverage,
-        _skipped_invisible,
-    ) = extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter, options)?;
+    let ((mut items, _rects, _lines), _thresholds, _gid_pages, page_rotations, _cmap_coverage) =
+        extract_positioned_text_from_doc_in_page_box(&doc, &font_cmaps, page_filter, options)?;
     if options.frame == PositionFrame::Display {
         display_frame::document_items_to_display_frame(&doc, &mut items, &page_rotations);
     }
     Ok((items, page_rotations))
-}
-
-/// Positioned page content in raw PDF user space (no visible-page-box shift),
-/// plus the per-page letter-spacing thresholds and rotated-page frames the
-/// Markdown pipeline consumes.
-#[derive(Debug, Default)]
-pub struct PositionedPageContent {
-    pub items: Vec<TextItem>,
-    pub rects: Vec<PdfRect>,
-    pub lines: Vec<PdfLine>,
-    /// Adaptive word-gap thresholds for letter-spaced pages, keyed by
-    /// 1-indexed page.
-    pub thresholds: HashMap<u32, f32>,
-    /// Frames of pages whose text was predominantly rotated; see
-    /// [`extract_text_with_positions_and_rotations_mem`].
-    pub rotations: HashMap<u32, geometry::PageRotation>,
-    /// 1-indexed pages that encountered fonts with unresolvable gid-encoded
-    /// glyphs.
-    pub gid_pages: HashSet<u32>,
-    /// 1-indexed pages that skipped invisible (Tr 3) text. Those runs can
-    /// be recovered with [`PositionOptions::include_invisible`].
-    pub skipped_invisible: HashSet<u32>,
-    /// Per-font ToUnicode/CMap coverage gaps observed in the extracted pages.
-    pub cmap_gaps: Vec<crate::FontCMapGaps>,
-}
-
-/// Extract items, path rectangles, and line segments from a memory buffer in
-/// one parse, in PDF user space. `page_filter` holds 1-indexed pages; `None`
-/// extracts every page. `options.frame` is ignored; this path stays in user
-/// space so table detection matches the Markdown pipeline.
-pub fn extract_positioned_page_content_mem(
-    buffer: &[u8],
-    page_filter: Option<&HashSet<u32>>,
-    options: PositionOptions,
-) -> Result<PositionedPageContent, PdfError> {
-    crate::validate_pdf_bytes(buffer)?;
-    let (doc, _) = crate::load_document_from_mem(buffer)?;
-    let font_cmaps = FontCMaps::from_doc(&doc);
-    let mut extraction_options = options.text_extraction(options.include_invisible);
-    extraction_options.cmap_coverage = true;
-    let ((items, rects, lines), thresholds, gid_pages, rotations, cmap_coverage, skipped_invisible) =
-        extract_positioned_text_impl(
-            &doc,
-            &font_cmaps,
-            page_filter,
-            extraction_options,
-            None,
-            CoordinateFrame::UserSpace,
-        )?;
-    Ok(PositionedPageContent {
-        items,
-        rects,
-        lines,
-        thresholds,
-        rotations,
-        gid_pages,
-        skipped_invisible,
-        cmap_gaps: crate::font_cmap_gaps(cmap_coverage),
-    })
-}
-
-/// Per-page coordinate frames: the visible box as laid out (`sheet_*`, raw
-/// user-space origin included for render transforms) and as rendered
-/// (`display_*`, turned clockwise by the inheritable `/Rotate`).
-/// `rotation_degrees` is the applied turn (0/90/180/270, snapped like
-/// renderers). Pages are 1-indexed like `TextItem::page`.
-#[derive(Debug, Clone, Copy)]
-pub struct PageFrameInfo {
-    pub page: u32,
-    pub sheet_x0: f32,
-    pub sheet_y0: f32,
-    pub sheet_width: f32,
-    pub sheet_height: f32,
-    pub display_width: f32,
-    pub display_height: f32,
-    pub rotation_degrees: u32,
-}
-
-/// Page frames for every page in a memory buffer, in document order.
-pub fn page_frame_info_mem(buffer: &[u8]) -> Result<Vec<PageFrameInfo>, PdfError> {
-    crate::validate_pdf_bytes(buffer)?;
-    let (doc, _) = crate::load_document_from_mem(buffer)?;
-    let pages = doc.get_pages();
-    let mut out = Vec::with_capacity(pages.len());
-    for (page, id) in &pages {
-        let sheet = visible_page_box(&doc, *id).unwrap_or(PageBox::LETTER);
-        let rotate = display_frame::page_rotate(&doc, *id);
-        let (display_width, display_height) = rotate.display_size(&sheet);
-        out.push(PageFrameInfo {
-            page: *page,
-            sheet_x0: sheet.x0,
-            sheet_y0: sheet.y0,
-            sheet_width: sheet.width(),
-            sheet_height: sheet.height(),
-            display_width,
-            display_height,
-            rotation_degrees: rotate.degrees() as u32,
-        });
-    }
-    out.sort_by_key(|info| info.page);
-    Ok(out)
-}
-
-/// [`extract_positioned_page_content_mem`] in the visible-page-box frame
-/// ([`extract_text_with_positions`]), or in the rendered frame when
-/// `options.frame` is [`PositionFrame::Display`] (see
-/// [`extract_text_with_positions_mem_in_frame`]). Geometry is lower-left
-/// origin, `y` up; `rotations` keeps reporting predominantly rotated pages in
-/// both frames.
-pub fn extract_positioned_page_content_mem_in_frame(
-    buffer: &[u8],
-    page_filter: Option<&HashSet<u32>>,
-    options: PositionOptions,
-) -> Result<PositionedPageContent, PdfError> {
-    crate::validate_pdf_bytes(buffer)?;
-    let (doc, _) = crate::load_document_from_mem(buffer)?;
-    let font_cmaps = FontCMaps::from_doc(&doc);
-    let mut extraction_options = options.text_extraction(options.include_invisible);
-    extraction_options.cmap_coverage = true;
-    let (
-        (mut items, mut rects, mut lines),
-        thresholds,
-        gid_pages,
-        rotations,
-        cmap_coverage,
-        skipped_invisible,
-    ) = extract_positioned_text_impl(
-        &doc,
-        &font_cmaps,
-        page_filter,
-        extraction_options,
-        None,
-        CoordinateFrame::VisiblePageBox,
-    )?;
-    if options.frame == PositionFrame::Display {
-        display_frame::document_items_to_display_frame(&doc, &mut items, &rotations);
-        display_frame::document_rects_lines_to_display_frame(
-            &doc, &mut rects, &mut lines, &rotations,
-        );
-    }
-    Ok(PositionedPageContent {
-        items,
-        rects,
-        lines,
-        thresholds,
-        rotations,
-        gid_pages,
-        skipped_invisible,
-        cmap_gaps: crate::font_cmap_gaps(cmap_coverage),
-    })
-}
-
-/// Column x-intervals on `page` and whether reading order is newspaper
-/// (sequential columns) rather than tabular (Y-interleaved). `page_has_table`
-/// is the same gate [`detect_columns`] uses.
-pub fn page_column_layout(
-    items: &[TextItem],
-    page: u32,
-    page_has_table: bool,
-) -> (Vec<(f32, f32)>, bool) {
-    let columns = detect_columns(items, page, page_has_table);
-    let intervals: Vec<(f32, f32)> = columns.iter().map(|c| (c.x_min, c.x_max)).collect();
-    if columns.len() < 2 {
-        return (intervals, false);
-    }
-    let mut col_buckets: Vec<Vec<TextItem>> = vec![Vec::new(); columns.len()];
-    for item in items
-        .iter()
-        .filter(|item| item.page == page && is_text_layout_item(item))
-    {
-        let item_left = item.x;
-        let item_right = item.x + crate::text_utils::effective_width(item);
-        let mut spans = 0;
-        let mut best_col = 0;
-        let mut best_overlap = f32::NEG_INFINITY;
-        for (ci, col) in columns.iter().enumerate() {
-            let overlap = (item_right.min(col.x_max) - item_left.max(col.x_min)).max(0.0);
-            if overlap > 0.0 {
-                spans += 1;
-            }
-            if overlap > best_overlap {
-                best_overlap = overlap;
-                best_col = ci;
-            }
-        }
-        if spans > 1 {
-            continue;
-        }
-        col_buckets[best_col].push(item.clone());
-    }
-    let per_column_lines: Vec<Vec<TextLine>> =
-        col_buckets.into_iter().map(group_into_lines).collect();
-    let newspaper = is_newspaper_layout(&per_column_lines, &columns);
-    (intervals, newspaper)
 }
 
 /// One page's geometry in the visible-page-box frame, from
@@ -671,17 +460,6 @@ pub(crate) type DocumentExtraction = (
     CMapCoverageByFont,
 );
 
-/// Document-level positioned extraction with the C-facing invisible-text
-/// routing signal retained alongside the upstream CMap coverage.
-pub(crate) type PositionedDocExtraction = (
-    PageExtraction,
-    PageThresholds,
-    HashSet<u32>,
-    PageRotations,
-    CMapCoverageByFont,
-    HashSet<u32>,
-);
-
 /// Extract positioned text, rectangles, and line segments from a pre-loaded document.
 ///
 /// Also returns per-page adaptive join thresholds for Canva-style pages.
@@ -690,16 +468,14 @@ pub(crate) fn extract_positioned_text_from_doc(
     font_cmaps: &FontCMaps,
     page_filter: Option<&HashSet<u32>>,
 ) -> Result<DocumentExtraction, PdfError> {
-    let (extraction, thresholds, gid, rotations, coverage, _skipped) =
-        extract_positioned_text_impl(
-            doc,
-            font_cmaps,
-            page_filter,
-            TextExtractionOptions::default(),
-            None,
-            CoordinateFrame::UserSpace,
-        )?;
-    Ok((extraction, thresholds, gid, rotations, coverage))
+    extract_positioned_text_impl(
+        doc,
+        font_cmaps,
+        page_filter,
+        TextExtractionOptions::default(),
+        None,
+        CoordinateFrame::UserSpace,
+    )
 }
 
 /// [`extract_positioned_text_from_doc`] with every page's geometry shifted
@@ -712,12 +488,12 @@ pub(crate) fn extract_positioned_text_from_doc_in_page_box(
     font_cmaps: &FontCMaps,
     page_filter: Option<&HashSet<u32>>,
     options: PositionOptions,
-) -> Result<PositionedDocExtraction, PdfError> {
+) -> Result<DocumentExtraction, PdfError> {
     extract_positioned_text_impl(
         doc,
         font_cmaps,
         page_filter,
-        options.text_extraction(options.include_invisible),
+        options.text_extraction(false),
         None,
         CoordinateFrame::VisiblePageBox,
     )
@@ -725,7 +501,7 @@ pub(crate) fn extract_positioned_text_from_doc_in_page_box(
 
 /// Coordinate frame of the geometry a positioned-text extraction returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CoordinateFrame {
+pub enum CoordinateFrame {
     /// Raw PDF user space, as written in the content stream. The markdown
     /// pipeline works here; its page-edge heuristics never leave it.
     UserSpace,
@@ -769,16 +545,14 @@ fn extract_positioned_text_with_folio_context_impl(
         ..TextExtractionOptions::default()
     };
     let Some(required_pages) = page_filter else {
-        let (extraction, thresholds, gid, rotations, coverage, _skipped) =
-            extract_positioned_text_impl(
-                doc,
-                font_cmaps,
-                None,
-                options,
-                None,
-                CoordinateFrame::UserSpace,
-            )?;
-        return Ok((extraction, thresholds, gid, rotations, coverage));
+        return extract_positioned_text_impl(
+            doc,
+            font_cmaps,
+            None,
+            options,
+            None,
+            CoordinateFrame::UserSpace,
+        );
     };
 
     let (
@@ -787,7 +561,6 @@ fn extract_positioned_text_with_folio_context_impl(
         mut gid_encoded_pages,
         mut page_rotations,
         cmap_coverage,
-        _skipped_invisible,
     ) = extract_positioned_text_impl(
         doc,
         font_cmaps,
@@ -821,7 +594,6 @@ fn extract_positioned_text_with_folio_context_impl(
         context_gid_pages,
         context_rotations,
         _context_coverage,
-        _context_skipped,
     ) = extract_positioned_text_impl(
         doc,
         font_cmaps,
@@ -855,26 +627,24 @@ pub(crate) fn extract_positioned_text_for_document_analysis(
     font_cmaps: &FontCMaps,
     required_pages: &HashSet<u32>,
 ) -> Result<DocumentExtraction, PdfError> {
-    let (extraction, thresholds, gid, rotations, coverage, _skipped) =
-        extract_positioned_text_impl(
-            doc,
-            font_cmaps,
-            None,
-            TextExtractionOptions::default(),
-            Some(required_pages),
-            CoordinateFrame::UserSpace,
-        )?;
-    Ok((extraction, thresholds, gid, rotations, coverage))
+    extract_positioned_text_impl(
+        doc,
+        font_cmaps,
+        None,
+        TextExtractionOptions::default(),
+        Some(required_pages),
+        CoordinateFrame::UserSpace,
+    )
 }
 
-fn extract_positioned_text_impl(
+pub fn extract_positioned_text_impl(
     doc: &Document,
     font_cmaps: &FontCMaps,
     page_filter: Option<&HashSet<u32>>,
     options: TextExtractionOptions,
     required_pages: Option<&HashSet<u32>>,
     frame: CoordinateFrame,
-) -> Result<PositionedDocExtraction, PdfError> {
+) -> Result<DocumentExtraction, PdfError> {
     let pages = doc.get_pages();
     let mut all_items = Vec::new();
     let mut all_rects = Vec::new();
@@ -883,7 +653,6 @@ fn extract_positioned_text_impl(
     let mut gid_encoded_pages: HashSet<u32> = HashSet::new();
     // Per font, the codes shown through its CMap over every extracted page.
     let mut cmap_coverage = CMapCoverageByFont::new();
-    let mut skipped_invisible_pages: HashSet<u32> = HashSet::new();
     // Embedded-font style flags are document-scoped: the same font program
     // is shared across pages, so parse it once, not once per page.
     let mut style_cache = FontStyleCache::new();
@@ -916,7 +685,7 @@ fn extract_positioned_text_impl(
             (mut items, mut rects, mut lines),
             has_gid_fonts,
             coords_rotated,
-            skipped_invisible,
+            _skipped_invisible,
             mut run_coverage,
         ) = match page_result {
             Ok(extraction) => extraction,
@@ -1018,9 +787,6 @@ fn extract_positioned_text_impl(
         }
         if has_gid_fonts {
             gid_encoded_pages.insert(*page_num);
-        }
-        if skipped_invisible {
-            skipped_invisible_pages.insert(*page_num);
         }
         for RunCoverage { font, stats, .. } in run_coverage {
             match cmap_coverage.get_mut(&*font) {
@@ -1130,7 +896,6 @@ fn extract_positioned_text_impl(
         gid_encoded_pages,
         page_rotations,
         cmap_coverage,
-        skipped_invisible_pages,
     ))
 }
 
@@ -1213,7 +978,7 @@ fn suppress_table_underlines(
 /// skew column/row clustering if they reached the heuristics. Hyperlinks
 /// and form fields *do* participate — the existing logic treats them as
 /// text-like and we keep that.
-pub(crate) fn is_text_layout_item(item: &crate::types::TextItem) -> bool {
+pub fn is_text_layout_item(item: &crate::types::TextItem) -> bool {
     !matches!(item.item_type, crate::types::ItemType::Image)
 }
 

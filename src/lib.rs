@@ -69,7 +69,6 @@ pub use markdown::{
     to_markdown_from_items_with_rects_and_page_count, MarkdownOptions, MarkdownProfile,
 };
 pub use process_mode::ProcessMode;
-pub use text_quality::{text_quality_metrics, TextQualityMetrics};
 pub use types::{BoldSource, LayoutComplexity, PdfLine, PdfRect, TextItem};
 
 use lopdf::Document;
@@ -762,7 +761,7 @@ fn extract_pages_markdown_mem_impl(
         {
             let image_regions: Vec<PdfRect> = page_items
                 .iter()
-                .filter_map(significant_image_region)
+                .filter_map(supplemental_ocr_image_region)
                 .collect();
             if !image_regions.is_empty() {
                 supplemental_ocr_regions.insert(page_1idx, image_regions);
@@ -919,7 +918,8 @@ fn extract_pages_markdown_mem_impl(
 /// structure such as a table. Logos, icons, and decorative rules remain below
 /// these physical-size gates. OCR still has to produce a valid table inside
 /// the region before any text is fused into a clean native page.
-pub fn significant_image_region(item: &TextItem) -> Option<PdfRect> {
+#[cfg(any(test, all(feature = "ocr", not(target_arch = "wasm32"))))]
+fn supplemental_ocr_image_region(item: &TextItem) -> Option<PdfRect> {
     const MIN_WIDTH_PT: f32 = 108.0;
     const MIN_HEIGHT_PT: f32 = 72.0;
     const MIN_AREA_PT2: f32 = 20_000.0;
@@ -4248,22 +4248,16 @@ pub fn load_document_from_mem_with_password(
         .map(|(doc, page_count, _)| (doc, page_count))
 }
 
-/// Repairs applied while loading a document: leading bytes dropped before
-/// the `%PDF-` header, container/xref rebuilds when the file did not parse,
-/// and Form XObject `/BBox` repairs after objects are in memory.
+/// Repairs applied to a document's objects once it is loaded, beyond the
+/// container repairs the loader tries when a file does not parse.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LoadRepairs {
-    /// Byte offset of the `%PDF-` header; `0` when the file starts at the
-    /// header or no header was found in the search window.
-    pub leading_bytes: usize,
     /// Form XObjects whose zero-area `/BBox` was widened
     /// (see `form_bbox_repair`).
     pub widened_form_bboxes: usize,
     /// `/BBox` numerals too large for any parser, saturated in the file's
     /// bytes before it was read (see `overlong_numerals`).
     pub saturated_bbox_numerals: usize,
-    /// The file did not parse until a container/xref repair candidate loaded.
-    pub container_repaired: bool,
 }
 
 impl LoadRepairs {
@@ -4288,7 +4282,6 @@ pub fn load_document_from_mem_with_repairs(
     // version-like mention in the leading bytes was taken for the header — is
     // recovered by lopdf's cross-reference reconstruction, the same path every
     // reader takes for it.
-    let leading_bytes = pdf_header_offset(buffer).unwrap_or(0);
     let buffer = strip_leading_bytes_before_header(buffer);
 
     // Fix malformed struct element names before parsing. Some PDF generators
@@ -4300,14 +4293,7 @@ pub fn load_document_from_mem_with_repairs(
     match load_document_bytes(buf, password) {
         Ok(doc) => {
             let (doc, saturated) = reload_after_saturating_bbox_numerals(doc, buf, password);
-            finish_loaded_document(
-                doc,
-                LoadRepairs {
-                    leading_bytes,
-                    saturated_bbox_numerals: saturated,
-                    ..LoadRepairs::default()
-                },
-            )
+            finish_loaded_document(doc, saturated)
         }
         Err(first_err) => {
             for repaired in repair_pdf_container_candidates(buf) {
@@ -4316,15 +4302,7 @@ pub fn load_document_from_mem_with_repairs(
                         log::debug!("loaded PDF after repairing malformed container bytes");
                         let (doc, saturated) =
                             reload_after_saturating_bbox_numerals(doc, &repaired, password);
-                        return finish_loaded_document(
-                            doc,
-                            LoadRepairs {
-                                leading_bytes,
-                                saturated_bbox_numerals: saturated,
-                                container_repaired: true,
-                                ..LoadRepairs::default()
-                            },
-                        );
+                        return finish_loaded_document(doc, saturated);
                     }
                     Err(e) => {
                         if is_encrypted_lopdf_error(&e) {
@@ -4376,7 +4354,7 @@ fn reload_after_saturating_bbox_numerals(
 /// successful parse.
 fn finish_loaded_document(
     mut doc: Document,
-    mut repairs: LoadRepairs,
+    saturated_bbox_numerals: usize,
 ) -> Result<(Document, u32, LoadRepairs), PdfError> {
     let page_count = doc.get_pages().len() as u32;
     if page_count == 0 {
@@ -4403,7 +4381,10 @@ fn finish_loaded_document(
              resolve as not-found"
         );
     }
-    repairs.widened_form_bboxes = form_bbox_repair::widen_degenerate_form_bboxes(&mut doc);
+    let repairs = LoadRepairs {
+        widened_form_bboxes: form_bbox_repair::widen_degenerate_form_bboxes(&mut doc),
+        saturated_bbox_numerals,
+    };
     Ok((doc, page_count, repairs))
 }
 
@@ -5039,7 +5020,7 @@ fn process_document(
 
 /// The fonts whose CMap lacked an entry for a code shown through it, with
 /// their counts, from the per-font coverage of an extraction.
-pub(crate) fn font_cmap_gaps(coverage: types::CMapCoverageByFont) -> Vec<FontCMapGaps> {
+fn font_cmap_gaps(coverage: types::CMapCoverageByFont) -> Vec<FontCMapGaps> {
     coverage
         .into_iter()
         .filter(|(_, stats)| stats.has_gaps())
@@ -7045,7 +7026,7 @@ const PDF_HEADER_PROBE_LEN: usize = 9;
 /// (`X-Note: %PDF-1.4`, say) therefore does not outrank the actual header.
 /// lopdf's own header parser requires the literal `%PDF-`, so a bare `%PDF`
 /// is not a candidate.
-fn pdf_header_offset(buffer: &[u8]) -> Option<usize> {
+pub fn pdf_header_offset(buffer: &[u8]) -> Option<usize> {
     // Only the start of the marker is bounded by the window; let the marker
     // itself run past it.
     let probe_end = (PDF_HEADER_SEARCH_WINDOW + PDF_HEADER_PROBE_LEN).min(buffer.len());
@@ -7300,19 +7281,21 @@ mod tests {
 
     #[test]
     fn supplemental_ocr_regions_require_substantial_physical_images() {
-        let substantial = significant_image_region(&test_image_item(200.0, 120.0)).unwrap();
+        let substantial = supplemental_ocr_image_region(&test_image_item(200.0, 120.0)).unwrap();
         assert_eq!(substantial.width, 200.0);
         assert_eq!(substantial.height, 120.0);
 
-        assert!(significant_image_region(&test_image_item(100.0, 200.0)).is_none());
-        assert!(significant_image_region(&test_image_item(200.0, 60.0)).is_none());
-        assert!(significant_image_region(&test_image_item(120.0, 100.0)).is_none());
-        assert!(significant_image_region(&test_item("text", 0.0, 0.0, 300.0, 300.0)).is_none());
+        assert!(supplemental_ocr_image_region(&test_image_item(100.0, 200.0)).is_none());
+        assert!(supplemental_ocr_image_region(&test_image_item(200.0, 60.0)).is_none());
+        assert!(supplemental_ocr_image_region(&test_image_item(120.0, 100.0)).is_none());
+        assert!(
+            supplemental_ocr_image_region(&test_item("text", 0.0, 0.0, 300.0, 300.0)).is_none()
+        );
     }
 
     #[test]
     fn supplemental_ocr_regions_normalize_negative_image_dimensions() {
-        let region = significant_image_region(&test_image_item(-200.0, -120.0)).unwrap();
+        let region = supplemental_ocr_image_region(&test_image_item(-200.0, -120.0)).unwrap();
         assert_eq!(region.x, -180.0);
         assert_eq!(region.y, -90.0);
         assert_eq!(region.width, 200.0);

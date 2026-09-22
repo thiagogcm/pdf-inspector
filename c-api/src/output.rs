@@ -1,6 +1,5 @@
 use super::*;
-use pdf_inspector::extractor::PageFrameInfo;
-use pdf_inspector::{BoldSource, PageRotation, PositionFrame, TextItem, TextQualityMetrics};
+use pdf_inspector::{BoldSource, PageRotation, TextItem};
 
 /// Memory behind one published record graph, freed together. Small strings
 /// and record arrays live in the arena; large owned buffers are kept as is.
@@ -28,7 +27,6 @@ c_slices! {
     PdfStrings => PdfBytes;
     PdfBoxes => PdfBox;
     PdfIntervals => PdfInterval;
-    PdfFloats => f32;
     PdfItems => PdfItem;
     PdfPageInfos => PdfPageInfo;
     PdfStructureElements => PdfStructureElement;
@@ -205,67 +203,4 @@ pub(super) fn orientation(rotation: PageRotation) -> u32 {
         PageRotation::Ccw => PDF_ORIENTATION_CCW,
         PageRotation::Cw => PDF_ORIENTATION_CW,
     }
-}
-pub(super) fn sheet_page_info(frame: &PageFrameInfo) -> PdfPageInfo {
-    PdfPageInfo {
-        page: frame.page,
-        width: frame.sheet_width,
-        height: frame.sheet_height,
-        rotation: frame.rotation_degrees,
-    }
-}
-pub(super) fn quality_view(metrics: TextQualityMetrics) -> PdfPageQuality {
-    PdfPageQuality {
-        alphanumeric_chars: metrics.alphanumeric_chars,
-        visible_chars: metrics.visible_chars,
-        density: metrics.density,
-        replacement_chars: metrics.replacement_chars,
-        longest_replacement_run: metrics.longest_replacement_run,
-        english_cosine: metrics.english_cosine,
-        score: metrics.score,
-    }
-}
-
-/// User-space box to the request frame, top-left origin, y down.
-pub(super) fn user_box_to_view(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    info: &PageFrameInfo,
-    frame: PositionFrame,
-) -> PdfBox {
-    let (x0, y0) = user_point_to_view(x, y, info, frame);
-    let (x1, y1) = user_point_to_view(x + w, y + h, info, frame);
-    PdfBox {
-        x0: x0.min(x1),
-        y0: y0.min(y1),
-        x1: x0.max(x1),
-        y1: y0.max(y1),
-    }
-}
-
-pub(super) fn user_x_to_view(x: f32, y: f32, info: &PageFrameInfo, frame: PositionFrame) -> f32 {
-    user_point_to_view(x, y, info, frame).0
-}
-
-pub(super) fn user_y_to_view(x: f32, y: f32, info: &PageFrameInfo, frame: PositionFrame) -> f32 {
-    user_point_to_view(x, y, info, frame).1
-}
-
-fn user_point_to_view(x: f32, y: f32, info: &PageFrameInfo, frame: PositionFrame) -> (f32, f32) {
-    let sx = x - info.sheet_x0;
-    let sy = y - info.sheet_y0;
-    let (dx, dy_up, height) = match (frame, info.rotation_degrees) {
-        (PositionFrame::Display, 90) => (sy, info.sheet_width - sx, info.display_height),
-        (PositionFrame::Display, 180) => (
-            info.sheet_width - sx,
-            info.sheet_height - sy,
-            info.display_height,
-        ),
-        (PositionFrame::Display, 270) => (info.sheet_height - sy, sx, info.display_height),
-        (PositionFrame::Display, _) => (sx, sy, info.display_height),
-        (PositionFrame::Sheet, _) => (sx, sy, info.sheet_height),
-    };
-    (dx, height - dy_up)
 }

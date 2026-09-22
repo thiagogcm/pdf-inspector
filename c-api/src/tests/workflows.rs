@@ -75,10 +75,10 @@ fn attach(r: &mut PdfRequest, ocr: &PdfOcrPageInput) {
 }
 
 #[test]
-fn analysis_and_detected_tables_need_no_markdown_or_hints() {
+fn analysis_needs_no_markdown_or_hints() {
     let doc = Doc::open("real-estate-pricing");
     let mut r = input::default_request();
-    r.outputs = PDF_OUT_ANALYSIS | PDF_OUT_TABLES;
+    r.outputs = PDF_OUT_ANALYSIS | PDF_OUT_ITEMS;
     let result = doc.run(&r);
     assert!(result.get().markdown.ptr.is_null());
     assert!(result.pages().iter().all(|p| p.markdown.ptr.is_null()));
@@ -96,46 +96,12 @@ fn analysis_and_detected_tables_need_no_markdown_or_hints() {
         assert!(columns.iter().all(|column| column.x1 >= column.x0));
         if columns.len() >= 2 {
             assert_ne!(page.flags & PDF_PAGE_HAS_COLUMNS, 0);
+            assert_ne!(page.reading_order, PDF_READING_SINGLE);
         }
     }
-    let tables = unsafe { input::slice(result.get().tables.ptr, result.get().tables.len).unwrap() };
-    assert!(
-        !tables.is_empty(),
-        "automatic tables must not require TSR inputs"
-    );
-    assert!(tables.iter().all(|t| t.flags & PDF_TABLE_FROM_HINT == 0));
-    assert!(tables.iter().any(|t| {
-        t.flags & PDF_TABLE_HAS_BOUNDS != 0
-            && t.kind == PDF_TABLE_DATA
-            && t.column_edges.len >= 2
-            && t.row_edges.len >= 2
-    }));
-    assert!(tables
-        .iter()
-        .any(|t| unsafe { string(t.markdown) }.contains("Multifamily")));
-    let cells: Vec<_> = tables
-        .iter()
-        .flat_map(|t| unsafe { input::slice(t.cells.ptr, t.cells.len).unwrap() })
-        .collect();
-    assert!(cells
-        .iter()
-        .any(|c| unsafe { string(c.text) }.contains("0.937")));
-    assert!(cells
-        .iter()
-        .all(|c| c.flags & (PDF_CELL_HAS_BOUNDS | PDF_CELL_SPAN_KNOWN) == 0));
-    let selected = [tables[0].page];
-    r.pages = PdfPageNumbers {
-        ptr: selected.as_ptr(),
-        len: 1,
-    };
-    let filtered = doc.run(&r);
-    assert!(
-        unsafe { input::slice(filtered.get().tables.ptr, filtered.get().tables.len).unwrap() }
-            .iter()
-            .all(|t| t.page == selected[0])
-    );
-    drop(doc);
-    assert!(unsafe { string(tables[0].markdown) }.contains('|'));
+    // Without table queries nothing is published as a table.
+    assert_eq!(result.get().tables.len, 0);
+    assert!(result.get().tables.ptr.is_null());
 }
 
 #[test]

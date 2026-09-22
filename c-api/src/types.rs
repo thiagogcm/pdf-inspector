@@ -24,7 +24,6 @@ pub const PDF_OUT_STRUCTURE: u32 = 16;
 pub const PDF_OUT_GEOMETRY: u32 = 32;
 pub const PDF_OUT_RENDER: u32 = 64;
 pub const PDF_OUT_ANALYSIS: u32 = 128;
-pub const PDF_OUT_TABLES: u32 = 256;
 /// `PdfRequest.flags`: also treat a weight class at or above
 /// `bold_weight_threshold` as bold.
 pub const PDF_REQUEST_BOLD_FROM_WEIGHT: u32 = 1;
@@ -120,8 +119,7 @@ pub const PDF_PAGE_OCR_RAN: u32 = 8;
 pub const PDF_PAGE_HOSTED_RECOMMENDED: u32 = 16;
 pub const PDF_PAGE_ENCODING_ISSUES: u32 = 32;
 pub const PDF_PAGE_GID_ENCODED: u32 = 64;
-pub const PDF_PAGE_SKIPPED_INVISIBLE: u32 = 128;
-pub const PDF_PAGE_NATIVE_RECOVERED: u32 = 256;
+pub const PDF_PAGE_NATIVE_RECOVERED: u32 = 128;
 /// `PdfPage.reading_order`.
 pub const PDF_READING_SINGLE: u32 = 0;
 pub const PDF_READING_TABULAR: u32 = 1;
@@ -138,11 +136,7 @@ pub const PDF_ORIENTATION_CW: u32 = 3;
 pub const PDF_LOAD_DECRYPTED: u32 = 1;
 pub const PDF_LOAD_WIDENED_FORM_BBOX: u32 = 2;
 pub const PDF_LOAD_LEADING_BYTES: u32 = 4;
-pub const PDF_LOAD_CONTAINER_REPAIRED: u32 = 8;
-pub const PDF_LOAD_SATURATED_BBOX: u32 = 16;
-/// `PdfTable.kind`.
-pub const PDF_TABLE_DATA: u32 = 0;
-pub const PDF_TABLE_TOC: u32 = 1;
+pub const PDF_LOAD_SATURATED_BBOX: u32 = 8;
 /// `PdfProvenance.source`.
 pub const PDF_CONTENT_NATIVE: u32 = 0;
 pub const PDF_CONTENT_OCR: u32 = 1;
@@ -157,11 +151,6 @@ pub const PDF_REGION_NEEDS_OCR: u32 = 1;
 pub const PDF_REGION_GRID_FOUND: u32 = 2;
 /// `PdfCell.flags` bits.
 pub const PDF_CELL_HEADER: u32 = 1;
-pub const PDF_CELL_HAS_BOUNDS: u32 = 2;
-pub const PDF_CELL_SPAN_KNOWN: u32 = 4;
-/// `PdfTable.flags` bits.
-pub const PDF_TABLE_FROM_HINT: u32 = 1;
-pub const PDF_TABLE_HAS_BOUNDS: u32 = 2;
 /// `PdfMarkdownOptions.flags` bits.
 pub const PDF_MD_HEADERS: u32 = 1;
 pub const PDF_MD_LISTS: u32 = 2;
@@ -455,20 +444,6 @@ pub struct PdfProvenance {
     pub model_revision: PdfBytes,
     pub warnings: PdfStrings,
 }
-/// Native-layer text quality numbers. `density` is alphanumeric/visible
-/// (`0` when there are no visible characters). `english_cosine` is 1 when
-/// there are no ASCII letters. `score` is the 0–1 native-candidate formula.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PdfPageQuality {
-    pub alphanumeric_chars: u32,
-    pub visible_chars: u32,
-    pub density: f32,
-    pub replacement_chars: u32,
-    pub longest_replacement_run: u32,
-    pub english_cosine: f32,
-    pub score: f32,
-}
 /// Horizontal column interval in the request frame; y is not invented.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -476,8 +451,9 @@ pub struct PdfInterval {
     pub x0: f32,
     pub x1: f32,
 }
-/// Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset;
-/// `saturated_bbox_numerals` counts `/BBox` numerals repaired before parsing.
+/// Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset
+/// in the source bytes; `saturated_bbox_numerals` counts `/BBox` numerals
+/// repaired before parsing.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfLoadAudit {
@@ -499,10 +475,8 @@ pub struct PdfCMapGap {
 }
 /// `reading_order` is `PDF_READING_*`; `text_orientation` is
 /// `PDF_ORIENTATION_*`, assessed whenever positioned content is parsed
-/// (items, text, geometry, or tables). `quality` is
-/// filled when native text or items are produced. `columns` are x-only
-/// intervals in the request frame. `charts` and `image_regions` are
-/// supplemental boxes in that frame.
+/// (items, text, or geometry). `columns` are x-only intervals in the
+/// request frame; `charts` are supplemental boxes in that frame.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfPage {
@@ -510,14 +484,12 @@ pub struct PdfPage {
     pub flags: u32,
     pub reading_order: u32,
     pub text_orientation: u32,
-    pub quality: PdfPageQuality,
     pub markdown: PdfBytes,
     pub text: PdfBytes,
     pub ocr_reasons: PdfStrings,
     pub items: PdfItems,
     pub columns: PdfIntervals,
     pub charts: PdfBoxes,
-    pub image_regions: PdfBoxes,
     pub structure: PdfStructureElements,
     pub rectangles: PdfRectangles,
     pub lines: PdfSegments,
@@ -547,28 +519,24 @@ pub struct PdfRegion {
     pub tokens: PdfStrings,
     pub cells: PdfBoxes,
 }
-/// `kind` is `PDF_TABLE_DATA` or `PDF_TABLE_TOC`. `column_edges` / `row_edges`
-/// are detector bands in the request frame when `PDF_TABLE_HAS_BOUNDS` is set.
+/// One resolved table query, in `request.tables` order. `bounds` echoes the
+/// query; `cells` is empty when a repair or fallback (`fallback_reason`)
+/// changed the table the Markdown describes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfTable {
     pub page: u32,
-    pub flags: u32,
-    /// Index in request.tables for hinted results; meaningful only with PDF_TABLE_FROM_HINT.
-    pub input_index: u32,
-    pub kind: u32,
     pub bounds: PdfBox,
     pub markdown: PdfBytes,
     pub fallback_reason: PdfBytes,
-    pub column_edges: PdfFloats,
-    pub row_edges: PdfFloats,
     pub cells: PdfCells,
 }
 /// One immutable graph of records, published by pointer and released only
 /// with pdf_inspector_result_free. Nested storage lasts as long as the
 /// result, independently of the source document. `flags` are `PDF_DOC_*`;
 /// `pages_sampled` and `pages_with_text` come from detector inspection;
-/// `cmap_gaps` is populated when positioned content is parsed.
+/// `cmap_gaps` is populated when positioned content is parsed; `tables`
+/// answers `request.tables` in order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfResult {
@@ -638,13 +606,6 @@ pub struct PdfBoxes {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfIntervals {
     pub ptr: *const PdfInterval,
-    pub len: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PdfFloats {
-    pub ptr: *const f32,
     pub len: usize,
 }
 

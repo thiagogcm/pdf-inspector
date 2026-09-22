@@ -78,7 +78,6 @@ pub struct PdfiumRenderer {
 
 /// Positioned native text recovered from one selected PDF page.
 #[derive(Debug)]
-#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
 pub(crate) struct PdfiumTextPage {
     pub(crate) page: u32,
     pub(crate) page_width: f32,
@@ -128,7 +127,6 @@ impl PdfiumRenderer {
     /// suspicious embedded text layer before paying for rasterization and
     /// OCR. A page-level text failure is treated as an unavailable recovery
     /// candidate so the caller can continue to its normal OCR fallback.
-    #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
     pub(crate) fn extract_text_pages(
         &self,
         pdf_bytes: &[u8],
@@ -218,7 +216,6 @@ impl PdfiumRenderer {
     }
 }
 
-#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
 fn text_chars_to_items(chars: &[PageChar], page: u32) -> Vec<TextItem> {
     #[derive(Debug, Clone, Copy)]
     struct Bounds {

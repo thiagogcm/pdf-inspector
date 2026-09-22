@@ -1,4 +1,5 @@
 use super::*;
+use pdf_inspector::extractor::TextExtractionOptions;
 use pdf_inspector::vision::{OcrMode, RenderOptions, RenderPixelFormat};
 use pdf_inspector::{MarkdownOptions, MarkdownProfile, PositionFrame, PositionOptions};
 use std::collections::BTreeSet;
@@ -240,12 +241,14 @@ pub(super) fn ocr_mode(mode: u32) -> Fallible<OcrMode> {
         _ => Err(Failure::invalid("unknown OCR mode")),
     }
 }
-pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
-    let frame = match r.frame {
-        PDF_FRAME_SHEET => PositionFrame::Sheet,
-        PDF_FRAME_DISPLAY => PositionFrame::Display,
-        _ => return Err(Failure::invalid("unknown coordinate frame")),
-    };
+pub(super) fn frame(r: &PdfRequest) -> Fallible<PositionFrame> {
+    match r.frame {
+        PDF_FRAME_SHEET => Ok(PositionFrame::Sheet),
+        PDF_FRAME_DISPLAY => Ok(PositionFrame::Display),
+        _ => Err(Failure::invalid("unknown coordinate frame")),
+    }
+}
+fn bold_weight_threshold(r: &PdfRequest) -> Fallible<u16> {
     reserved(
         r.flags,
         PDF_REQUEST_BOLD_FROM_WEIGHT | PDF_REQUEST_INCLUDE_INVISIBLE,
@@ -256,9 +259,22 @@ pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
             "bold weight threshold is outside 100..900",
         ));
     }
+    Ok(r.bold_weight_threshold as u16)
+}
+/// Options for the core's region readers (public position API).
+pub(super) fn position_options(r: &PdfRequest) -> Fallible<PositionOptions> {
     Ok(PositionOptions::new()
-        .frame(frame)
+        .frame(frame(r)?)
         .bold_from_weight(r.flags & PDF_REQUEST_BOLD_FROM_WEIGHT != 0)
-        .bold_weight_threshold(r.bold_weight_threshold as u16)
-        .include_invisible(r.flags & PDF_REQUEST_INCLUDE_INVISIBLE != 0))
+        .bold_weight_threshold(bold_weight_threshold(r)?))
+}
+/// Switches for the positioned parse of the selected pages.
+pub(super) fn text_extraction_options(r: &PdfRequest) -> Fallible<TextExtractionOptions> {
+    frame(r)?;
+    Ok(TextExtractionOptions {
+        include_invisible: r.flags & PDF_REQUEST_INCLUDE_INVISIBLE != 0,
+        bold_from_weight: r.flags & PDF_REQUEST_BOLD_FROM_WEIGHT != 0,
+        bold_weight_threshold: bold_weight_threshold(r)?,
+        cmap_coverage: true,
+    })
 }

@@ -1,105 +1,163 @@
-use super::output::narrow;
-use super::*;
-use lopdf::Document;
-use pdf_inspector::extractor::{PageFrameInfo, PositionedPageContent};
-use pdf_inspector::markdown::{detect_tables_from_items, MarkdownDocumentContext};
-use pdf_inspector::structure_tree::StructTree;
-use pdf_inspector::tables::TableKind;
-use pdf_inspector::{MarkdownOptions, PositionFrame};
+//! Caller-hinted tables: TSR structure tokens plus cell quadrilaterals,
+//! resolved by the core's structured-table readers.
 
-/// Automatically detected native tables on the selected pages, through
-/// the same detector the Markdown pipeline uses, including TOCs.
-pub(super) fn detect(
-    storage: &Storage,
-    content: &PositionedPageContent,
-    doc: Option<&Document>,
-    selected: &[u32],
-    state: &DocumentState,
-    options: MarkdownOptions,
-    frame: PositionFrame,
-) -> Vec<PdfTable> {
-    let tree = doc.and_then(StructTree::from_doc);
-    let pages = doc.map(Document::get_pages).unwrap_or_default();
-    let roles = tree.as_ref().map(|tree| tree.mcid_to_roles(&pages));
-    let tagged_tables = tree
-        .as_ref()
-        .map(|tree| tree.extract_tables(&pages))
-        .unwrap_or_default();
-    detect_tables_from_items(
-        content.items.clone(),
-        options,
-        &content.rects,
-        &content.lines,
-        MarkdownDocumentContext {
-            page_thresholds: &content.thresholds,
-            struct_roles: roles.as_ref(),
-            struct_tables: &tagged_tables,
-            page_count: state.count(),
-            prefiltered_page_number_pages: None,
-            prefiltered_page_number_mask: None,
-            precomputed_chart_regions: None,
-        },
-    )
-    .into_iter()
-    .filter(|(page, _)| selected.contains(page))
-    .map(|(page, table)| {
-        let info = state.frame_info(page).ok();
-        let (bounds, column_edges, row_edges, flags) = table_geometry(&table, info.as_ref(), frame);
-        let cells = table.cells.iter().enumerate().flat_map(|(row, cells)| {
-            cells.iter().enumerate().map(move |(column, text)| PdfCell {
-                row: narrow(row),
-                column: narrow(column),
-                row_span: 1,
-                column_span: 1,
-                text: storage.bytes(text),
-                ..PdfCell::default()
-            })
-        });
-        PdfTable {
-            page,
-            flags,
-            kind: match table.kind {
-                TableKind::Data => PDF_TABLE_DATA,
-                TableKind::Toc => PDF_TABLE_TOC,
-            },
-            bounds,
-            markdown: storage.owned(pdf_inspector::tables::table_to_markdown(&table).into_bytes()),
-            column_edges: storage.slice(column_edges),
-            row_edges: storage.slice(row_edges),
-            cells: storage.slice(cells),
-            ..PdfTable::default()
+use super::input::*;
+use super::output::{narrow, page_box};
+use super::*;
+use std::collections::BTreeMap;
+
+/// Column cap shared with the core table formatter.
+const MAX_TABLE_COLUMNS: usize = 25;
+
+/// Bound caller-supplied TSR structure before the core's lenient parser sees
+/// it: one cell quadrilateral per cell tag, parseable spans, and spans that
+/// cannot make the occupancy grid grow independently of the token count.
+fn validate_structure_tokens(tokens: &[String], cells: usize) -> Fallible<()> {
+    let rows = tokens
+        .iter()
+        .filter(|token| token.trim() == "<tr>")
+        .count()
+        .max(1);
+    let mut cell_tags = 0usize;
+    for token in tokens {
+        let token = token.trim();
+        match token {
+            "<td></td>" | "<th></th>" | "<td" | "<th" => cell_tags += 1,
+            _ => {
+                let (name, limit) = if token.starts_with("rowspan") {
+                    ("rowspan", rows)
+                } else if token.starts_with("colspan") {
+                    ("colspan", MAX_TABLE_COLUMNS)
+                } else {
+                    continue;
+                };
+                let value = token[name.len()..]
+                    .trim()
+                    .strip_prefix('=')
+                    .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\''))
+                    .and_then(|v| v.parse::<usize>().ok());
+                match value {
+                    Some(v) if (1..=limit).contains(&v) => {}
+                    _ => {
+                        return Err(Failure::invalid(format!(
+                            "invalid table structure: {name} must be an integer in 1..={limit}"
+                        )))
+                    }
+                }
+            }
         }
-    })
-    .collect()
+    }
+    if cell_tags != cells {
+        return Err(Failure::invalid("table structure and cell count differ"));
+    }
+    Ok(())
 }
 
-fn table_geometry(
-    table: &pdf_inspector::tables::Table,
-    info: Option<&PageFrameInfo>,
-    frame: PositionFrame,
-) -> (PdfBox, Vec<f32>, Vec<f32>, u32) {
-    let Some(info) = info else {
-        return (PdfBox::default(), Vec::new(), Vec::new(), 0);
-    };
-    if table.columns.len() < 2 || table.rows.len() < 2 {
-        return (PdfBox::default(), Vec::new(), Vec::new(), 0);
+pub(super) fn validate_quad(q: PdfQuad) -> Fallible<()> {
+    for p in q.points {
+        finite(p.x, "polygon x")?;
+        finite(p.y, "polygon y")?;
     }
-    let x0 = *table.columns.first().unwrap();
-    let x1 = *table.columns.last().unwrap();
-    let y_lo = table.rows.iter().copied().fold(f32::INFINITY, f32::min);
-    let y_hi = table.rows.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let y_mid = (y_lo + y_hi) * 0.5;
-    let x_mid = (x0 + x1) * 0.5;
-    let bounds = super::output::user_box_to_view(x0, y_lo, x1 - x0, y_hi - y_lo, info, frame);
-    let column_edges = table
-        .columns
+    let area = q
+        .points
         .iter()
-        .map(|&x| super::output::user_x_to_view(x, y_mid, info, frame))
-        .collect();
-    let row_edges = table
-        .rows
+        .zip(q.points.iter().cycle().skip(1))
+        .take(4)
+        .map(|(a, b)| f64::from(a.x) * f64::from(b.y) - f64::from(b.x) * f64::from(a.y))
+        .sum::<f64>();
+    if !area.is_finite() || area.abs() < f64::EPSILON {
+        return Err(Failure::invalid("polygon must have positive area"));
+    }
+    Ok(())
+}
+
+pub(super) unsafe fn table_input(
+    t: &PdfTableInput,
+    count: u32,
+) -> Fallible<pdf_inspector::TsrTableInput> {
+    page(t.page, count)?;
+    let crop = bounds(t.bounds)?;
+    if t.mode > PDF_TSR_STRICT {
+        return Err(Failure::invalid("invalid TSR mode"));
+    }
+    let tokens = slice(t.tokens.ptr, t.tokens.len)?
         .iter()
-        .map(|&y| super::output::user_y_to_view(x_mid, y, info, frame))
+        .map(|s| text(*s).map(str::to_owned))
+        .collect::<Fallible<Vec<_>>>()?;
+    let cells = slice(t.cells.ptr, t.cells.len)?;
+    validate_structure_tokens(&tokens, cells.len())?;
+    let mut boxes = Vec::new();
+    for cell in cells {
+        validate_quad(*cell)?;
+        boxes.push(
+            cell.points
+                .iter()
+                .flat_map(|p| [p.x - crop[0], p.y - crop[1]])
+                .collect(),
+        );
+    }
+    Ok(pdf_inspector::TsrTableInput {
+        page: t.page - 1,
+        crop_pdf_pt_bbox: crop,
+        render_dpi: 72.0,
+        structure_tokens: tokens,
+        cell_bboxes: boxes,
+    })
+}
+
+/// Resolve every hinted table, in input order, with two batched core calls at most.
+pub(super) fn hinted_tables(
+    storage: &Storage,
+    bytes: &[u8],
+    tables: &[PdfTableInput],
+    inputs: Vec<pdf_inspector::TsrTableInput>,
+) -> Fallible<Vec<PdfTable>> {
+    let cells = pdf_inspector::extract_tables_with_structure_cells_mem(bytes, &inputs)?;
+    let auto_indices = tables
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.mode == PDF_TSR_AUTO)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    let auto_inputs = auto_indices
+        .iter()
+        .map(|&i| inputs[i].clone())
+        .collect::<Vec<_>>();
+    // Pair repairs with their descriptors by index; a short core answer
+    // then surfaces as a missing entry rather than a misaligned one.
+    let mut auto: BTreeMap<usize, _> = auto_indices
+        .into_iter()
+        .zip(pdf_inspector::extract_tables_with_structure_auto_mem(
+            bytes,
+            &auto_inputs,
+        )?)
         .collect();
-    (bounds, column_edges, row_edges, PDF_TABLE_HAS_BOUNDS)
+    if cells.len() != tables.len() || auto.len() != auto_inputs.len() {
+        return Err(Failure::runtime("core answered fewer tables than queried"));
+    }
+    let mut views = Vec::with_capacity(tables.len());
+    for (input_index, (input, cells)) in tables.iter().zip(cells).enumerate() {
+        let (markdown, fallback) = match auto.remove(&input_index) {
+            Some(r) => (r.markdown, r.fallback_reason),
+            None => (pdf_inspector::tables::cells_to_markdown(&cells), None),
+        };
+        // A repaired table's cells no longer describe its Markdown.
+        let resolved = if fallback.is_none() { &cells[..] } else { &[] };
+        views.push(PdfTable {
+            page: input.page,
+            bounds: input.bounds,
+            markdown: storage.owned(markdown.into_bytes()),
+            fallback_reason: storage.optional(fallback.as_deref()),
+            cells: storage.slice(resolved.iter().map(|c| PdfCell {
+                row: narrow(c.row),
+                column: narrow(c.col),
+                row_span: narrow(c.rowspan),
+                column_span: narrow(c.colspan),
+                flags: u32::from(c.is_header) * PDF_CELL_HEADER,
+                bounds: page_box(c.page_pt_bbox),
+                text: storage.bytes(&c.text),
+            })),
+        });
+    }
+    Ok(views)
 }
