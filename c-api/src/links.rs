@@ -24,19 +24,12 @@ pub(super) fn dest_items(
     extract(doc, selected)
         .into_iter()
         .filter_map(|link| {
-            let info = state.frame_info(link.page).ok()?;
+            let page_frame = state.frame(link.page).ok()?;
             Some(PdfItem {
                 page: link.page,
                 kind: PDF_ITEM_LINK,
                 dest_page: link.dest_page,
-                bounds: super::output::user_box_to_view(
-                    link.x,
-                    link.y,
-                    link.width,
-                    link.height,
-                    &info,
-                    frame,
-                ),
+                bounds: page_frame.user_box_to_view(link.x, link.y, link.width, link.height, frame),
                 text: storage.bytes(""),
                 font: storage.bytes(""),
                 font_tag: storage.bytes(""),

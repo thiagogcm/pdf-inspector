@@ -9,13 +9,13 @@
 //! page turned by `/Rotate` instead. [`PositionFrame::Display`] reports items
 //! in, and reads regions from, that rendered frame.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use lopdf::{Document, Object, ObjectId};
 
 use super::geometry::{normalize_degrees, PageRotation};
 use super::page_box::{visible_page_box, PageBox};
-use crate::types::{ItemType, PdfLine, PdfRect, TextItem};
+use crate::types::{ItemType, TextItem};
 
 /// Coordinate frame positioned items are reported in and region rects are
 /// read in.
@@ -40,7 +40,7 @@ pub enum PositionFrame {
 
 /// A page's `/Rotate`, normalised to a right angle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum PageRotate {
+pub enum PageRotate {
     #[default]
     Rotate0,
     Rotate90,
@@ -67,7 +67,7 @@ impl PageRotate {
     }
 
     /// The clockwise turn a renderer applies to the sheet, in degrees.
-    pub(crate) fn degrees(self) -> f32 {
+    pub fn degrees(self) -> f32 {
         match self {
             PageRotate::Rotate0 => 0.0,
             PageRotate::Rotate90 => 90.0,
@@ -78,7 +78,7 @@ impl PageRotate {
 
     /// Width and height of the rendered page: the visible box's extents,
     /// swapped by a quarter turn.
-    pub(crate) fn display_size(self, sheet: &PageBox) -> (f32, f32) {
+    pub fn display_size(self, sheet: &PageBox) -> (f32, f32) {
         let (width, height) = (sheet.width(), sheet.height());
         match self {
             PageRotate::Rotate0 | PageRotate::Rotate180 => (width, height),
@@ -89,7 +89,7 @@ impl PageRotate {
     /// Turn a sheet-frame box (lower-left origin, `y` up) into the display
     /// frame. Both edges are normalised first, so the result always has
     /// non-negative extents.
-    pub(crate) fn sheet_box_to_display(
+    pub fn sheet_box_to_display(
         self,
         sheet: &PageBox,
         x: f32,
@@ -134,7 +134,7 @@ impl PageRotate {
 /// The page's inheritable `/Rotate`, walking `/Parent` links like the page
 /// boxes. The first ancestor carrying the key decides, as in renderers; a
 /// missing or malformed value reads as `0`.
-pub(crate) fn page_rotate(doc: &Document, page_id: ObjectId) -> PageRotate {
+pub fn page_rotate(doc: &Document, page_id: ObjectId) -> PageRotate {
     let mut id = page_id;
     for _ in 0..32 {
         let Ok(dict) = doc.get_dictionary(id) else {
@@ -223,7 +223,7 @@ pub(crate) fn items_to_display_frame(
 /// `page_rotations` holds the turn of every predominantly rotated page
 /// (pages absent from it are upright), as the position pipeline reports it,
 /// and each page's `/Rotate` and visible box are read from `doc`.
-pub(crate) fn document_items_to_display_frame(
+pub fn document_items_to_display_frame(
     doc: &Document,
     items: &mut [TextItem],
     page_rotations: &HashMap<u32, PageRotation>,
@@ -248,63 +248,6 @@ pub(crate) fn document_items_to_display_frame(
             (turn, rotate, sheet)
         });
         items_to_display_frame(std::slice::from_mut(item), turn, rotate, &sheet);
-    }
-}
-
-fn page_frame(
-    doc: &Document,
-    pages: &BTreeMap<u32, ObjectId>,
-    page: u32,
-    page_rotations: &HashMap<u32, PageRotation>,
-) -> (PageRotation, PageRotate, PageBox) {
-    let turn = page_rotations
-        .get(&page)
-        .copied()
-        .unwrap_or(PageRotation::Upright);
-    match pages.get(&page) {
-        Some(&page_id) => (
-            turn,
-            page_rotate(doc, page_id),
-            visible_page_box(doc, page_id).unwrap_or(PageBox::LETTER),
-        ),
-        None => (turn, PageRotate::Rotate0, PageBox::LETTER),
-    }
-}
-
-/// [`document_items_to_display_frame`] for path geometry: rectangles and line
-/// segments follow their page's items through the same unturn-then-turn
-/// mapping, reusing the tested box primitive (lines via degenerate boxes).
-pub(crate) fn document_rects_lines_to_display_frame(
-    doc: &Document,
-    rects: &mut [PdfRect],
-    lines: &mut [PdfLine],
-    page_rotations: &HashMap<u32, PageRotation>,
-) {
-    let pages = doc.get_pages();
-    let mut frames: HashMap<u32, (PageRotation, PageRotate, PageBox)> = HashMap::new();
-    for rect in rects.iter_mut() {
-        let (turn, rotate, sheet) = *frames
-            .entry(rect.page)
-            .or_insert_with(|| page_frame(doc, &pages, rect.page, page_rotations));
-        turn.unrotate_box(&mut rect.x, &mut rect.y, &mut rect.width, &mut rect.height);
-        let (x, y, width, height) =
-            rotate.sheet_box_to_display(&sheet, rect.x, rect.y, rect.width, rect.height);
-        rect.x = x;
-        rect.y = y;
-        rect.width = width;
-        rect.height = height;
-    }
-    for line in lines.iter_mut() {
-        let (turn, rotate, sheet) = *frames
-            .entry(line.page)
-            .or_insert_with(|| page_frame(doc, &pages, line.page, page_rotations));
-        for (x, y) in [(&mut line.x1, &mut line.y1), (&mut line.x2, &mut line.y2)] {
-            let (mut px, mut py, mut w, mut h) = (*x, *y, 0.0, 0.0);
-            turn.unrotate_box(&mut px, &mut py, &mut w, &mut h);
-            let (dx, dy, _, _) = rotate.sheet_box_to_display(&sheet, px, py, w, h);
-            *x = dx;
-            *y = dy;
-        }
     }
 }
 

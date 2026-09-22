@@ -49,8 +49,6 @@
 
 #define PDF_OUT_ANALYSIS 128
 
-#define PDF_OUT_TABLES 256
-
 /**
  * `PdfRequest.flags`: also treat a weight class at or above
  * `bold_weight_threshold` as bold.
@@ -260,9 +258,7 @@
 
 #define PDF_PAGE_GID_ENCODED 64
 
-#define PDF_PAGE_SKIPPED_INVISIBLE 128
-
-#define PDF_PAGE_NATIVE_RECOVERED 256
+#define PDF_PAGE_NATIVE_RECOVERED 128
 
 /**
  * `PdfPage.reading_order`.
@@ -302,16 +298,7 @@
 
 #define PDF_LOAD_LEADING_BYTES 4
 
-#define PDF_LOAD_CONTAINER_REPAIRED 8
-
-#define PDF_LOAD_SATURATED_BBOX 16
-
-/**
- * `PdfTable.kind`.
- */
-#define PDF_TABLE_DATA 0
-
-#define PDF_TABLE_TOC 1
+#define PDF_LOAD_SATURATED_BBOX 8
 
 /**
  * `PdfProvenance.source`.
@@ -342,17 +329,6 @@
  * `PdfCell.flags` bits.
  */
 #define PDF_CELL_HEADER 1
-
-#define PDF_CELL_HAS_BOUNDS 2
-
-#define PDF_CELL_SPAN_KNOWN 4
-
-/**
- * `PdfTable.flags` bits.
- */
-#define PDF_TABLE_FROM_HINT 1
-
-#define PDF_TABLE_HAS_BOUNDS 2
 
 /**
  * `PdfMarkdownOptions.flags` bits.
@@ -579,8 +555,9 @@ typedef struct {
 } PdfSource;
 
 /**
- * Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset;
- * `saturated_bbox_numerals` counts `/BBox` numerals repaired before parsing.
+ * Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset
+ * in the source bytes; `saturated_bbox_numerals` counts `/BBox` numerals
+ * repaired before parsing.
  */
 typedef struct {
   uint32_t flags;
@@ -610,21 +587,6 @@ typedef struct {
   PdfLoadAudit audit;
   PdfPageInfos pages;
 } PdfDocumentInfo;
-
-/**
- * Native-layer text quality numbers. `density` is alphanumeric/visible
- * (`0` when there are no visible characters). `english_cosine` is 1 when
- * there are no ASCII letters. `score` is the 0–1 native-candidate formula.
- */
-typedef struct {
-  uint32_t alphanumeric_chars;
-  uint32_t visible_chars;
-  float density;
-  uint32_t replacement_chars;
-  uint32_t longest_replacement_run;
-  float english_cosine;
-  float score;
-} PdfPageQuality;
 
 /**
  * Complete positioned run. Rotation is clockwise; positive baseline_shift
@@ -748,24 +710,20 @@ typedef struct {
 /**
  * `reading_order` is `PDF_READING_*`; `text_orientation` is
  * `PDF_ORIENTATION_*`, assessed whenever positioned content is parsed
- * (items, text, geometry, or tables). `quality` is
- * filled when native text or items are produced. `columns` are x-only
- * intervals in the request frame. `charts` and `image_regions` are
- * supplemental boxes in that frame.
+ * (items, text, or geometry). `columns` are x-only intervals in the
+ * request frame; `charts` are supplemental boxes in that frame.
  */
 typedef struct {
   PdfPageInfo info;
   uint32_t flags;
   uint32_t reading_order;
   uint32_t text_orientation;
-  PdfPageQuality quality;
   PdfBytes markdown;
   PdfBytes text;
   PdfStrings ocr_reasons;
   PdfItems items;
   PdfIntervals columns;
   PdfBoxes charts;
-  PdfBoxes image_regions;
   PdfStructureElements structure;
   PdfRectangles rectangles;
   PdfSegments lines;
@@ -795,11 +753,6 @@ typedef struct {
 } PdfRegions;
 
 typedef struct {
-  const float *ptr;
-  size_t len;
-} PdfFloats;
-
-typedef struct {
   uint32_t row;
   uint32_t column;
   uint32_t row_span;
@@ -815,22 +768,15 @@ typedef struct {
 } PdfCells;
 
 /**
- * `kind` is `PDF_TABLE_DATA` or `PDF_TABLE_TOC`. `column_edges` / `row_edges`
- * are detector bands in the request frame when `PDF_TABLE_HAS_BOUNDS` is set.
+ * One resolved table query, in `request.tables` order. `bounds` echoes the
+ * query; `cells` is empty when a repair or fallback (`fallback_reason`)
+ * changed the table the Markdown describes.
  */
 typedef struct {
   uint32_t page;
-  uint32_t flags;
-  /**
-   * Index in request.tables for hinted results; meaningful only with PDF_TABLE_FROM_HINT.
-   */
-  uint32_t input_index;
-  uint32_t kind;
   PdfBox bounds;
   PdfBytes markdown;
   PdfBytes fallback_reason;
-  PdfFloats column_edges;
-  PdfFloats row_edges;
   PdfCells cells;
 } PdfTable;
 
@@ -890,7 +836,8 @@ typedef struct {
  * with pdf_inspector_result_free. Nested storage lasts as long as the
  * result, independently of the source document. `flags` are `PDF_DOC_*`;
  * `pages_sampled` and `pages_with_text` come from detector inspection;
- * `cmap_gaps` is populated when positioned content is parsed.
+ * `cmap_gaps` is populated when positioned content is parsed; `tables`
+ * answers `request.tables` in order.
  */
 typedef struct {
   uint32_t present;

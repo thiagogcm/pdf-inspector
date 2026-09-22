@@ -903,7 +903,7 @@ pub(crate) fn effective_font_size(base_size: f32, text_matrix: &[f32; 6]) -> f32
 /// and column detection and region routing need that footprint or they
 /// displace it into another line and split the word. The stand-in is a
 /// layout extent only; the item's box keeps its measured width.
-pub(crate) fn effective_width(item: &TextItem) -> f32 {
+pub fn effective_width(item: &TextItem) -> f32 {
     if item.width > 0.0 {
         item.width
     } else {

@@ -26,23 +26,21 @@ Run `c-api/scripts/generate-c-header.sh` after changing public C records or func
 
 The C adapter lives in `c-api/`, following the independent-crate layout of `napi/` and `wasm/`. It owns ABI records, pointers, handles, validation, result storage, exported symbols, the generated header, linker settings, and consumer tests. Its library is named `pdf_inspector_c` so its artifacts cannot overwrite the core/Python library. There is no root `c-api` feature or compatibility forwarding layer.
 
-The adapter runs the core's byte-oriented public API, exactly as the Node and Python bindings do. Each operation parses the retained bytes again; that is by design, and it keeps the core crate at upstream. The remaining core differences are small and additive:
+The adapter runs the core's public API, exactly as the Node and Python bindings do, plus a handful of core internals that are only made visible. Each operation parses the retained bytes again; that is by design, and it keeps the core crate at upstream. The remaining core differences are:
 
 | Core change | Kind | Why it remains |
 | --- | --- | --- |
-| `validate_pdf_bytes`, `load_document_from_mem_with_password`, `load_document_from_mem_with_repairs` | visibility | Open validates and decrypts once with the core loader and records load repairs |
-| `extractor::{visible_page_box, PageBox}` | visibility | Page dimensions and the coordinate frame every view is converted into |
-| `extract_pages_markdown_mem_with_options` | additive wrapper | Per-page Markdown with a password and the request's Markdown options |
-| `extractor::extract_positioned_page_content_mem` | additive wrapper | Items, rectangles, lines, thresholds, rotations, gid pages, skipped-invisible pages, and upstream CMap gaps from one parse, with `PositionOptions` |
-| `extractor::PositionedPageContent.cmap_gaps` | additive data | Upstream per-font ToUnicode/CMap coverage gaps for positioned C-API extraction |
-| `extractor::page_column_layout` | additive wrapper | Column x-intervals and newspaper vs tabular reading order |
-| `markdown::{MarkdownDocumentContext, to_markdown_from_items_with_rects_and_lines}` | visibility | Role-aware composition without a document |
-| `markdown::detect_tables_from_items` | additive output mode | Logical tables including TOCs, with detector row/column bands |
-| `text_quality_metrics` | additive | Native-layer quality numbers shared with OCR fusion scoring |
-| `significant_image_region` | visibility | The OCR-region image size gate, reused for `PdfPage.image_regions` |
+| `markdown`/`tables` complete-table helpers gated on `vision` instead of `ocr` | upstream bug fix | Upstream's `vision`-only build does not compile; the C crate builds the core with `vision` |
+| `extract_pages_markdown_mem_with_options` | additive wrapper | Per-page Markdown with a password and the request's Markdown options; upstream only offers the defaults |
+| `load_document_from_mem_with_password`, `load_document_from_mem_with_repairs`, `LoadRepairs`, `pdf_header_offset` | visibility | Open validates, decrypts, and audits with the core loader |
+| `extractor::{visible_page_box, PageBox}`, `extractor::display_frame::{page_rotate, PageRotate, document_items_to_display_frame}`, `PageRotation::unrotate_box` | visibility | Page frames and the display-frame conversion of runs and path geometry |
+| `extractor::{extract_positioned_text_impl, TextExtractionOptions, CoordinateFrame}` | visibility | One positioned parse yielding runs, rectangles, lines, rotations, gid pages, and CMap coverage, with invisible text opt-in |
+| `extractor::{detect_columns, is_newspaper_layout, ColumnRegion, is_text_layout_item}`, `text_utils::effective_width` | visibility | Column intervals and newspaper vs tabular reading order |
+| `markdown::{MarkdownDocumentContext, to_markdown_from_items_with_rects_and_lines}` | visibility | Role-aware composition with line segments, without a document |
 | `structure_tree::StructRole::from_name` | visibility | Caller-supplied structure roles for composition |
 | `vision::cached_ocr_engine` | visibility | Runtime preparation warms the same process-cached OCR sessions |
-| Complete-table helpers gated on `vision` instead of `ocr` | cfg fix | Upstream's `vision`-only build does not compile; the C crate builds the core with `vision` |
+
+Every visibility change is a `pub(crate)` (or private) item made `pub`; no core signature, field, or behavior differs from upstream. The bug fix and the wrapper are candidates for upstream pull requests.
 
 Run core checks from the repository root and binding checks explicitly:
 
@@ -100,9 +98,9 @@ int main(int argc, char **argv) {
 }
 ```
 
-`PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfSource.password` supplies a UTF-8 password; an absent password (NULL pointer) uses the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it. Form XObjects whose `/BBox` has no area are widened, and overlong `/BBox` numerals are saturated, the same way the core loader repairs them, so later rendering and OCR see the repaired bytes.
+`PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfSource.password` supplies a UTF-8 password; an absent password (NULL pointer) uses the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it. The core loader's repairs (widened zero-area form `/BBox` entries, saturated overlong `/BBox` numerals, container rebuilds) are re-applied by every later parse, so only decryption is written back.
 
-`pdf_inspector_document_info` borrows the facts recorded at open: `page_count`, every page's sheet-frame dimensions and `/Rotate` in `pages`, and the load `audit` (decryption, leading bytes before `%PDF-`, container/xref rebuilds, widened form `/BBox` counts, and saturated `/BBox` numeral counts). The pointer stays valid until `pdf_inspector_document_free`. `pdf_inspector_version` returns the library version as static UTF-8.
+`pdf_inspector_document_info` borrows the facts recorded at open: `page_count`, every page's sheet-frame dimensions and `/Rotate` in `pages`, and the load `audit` (decryption, leading bytes before `%PDF-`, widened form `/BBox` counts, and saturated `/BBox` numeral counts). The pointer stays valid until `pdf_inspector_document_free`. `pdf_inspector_version` returns the library version as static UTF-8.
 
 Initialize requests with `pdf_inspector_request_init`. NULL requests have the same defaults: all pages, inspection and document/page Markdown, upstream formatting and detection defaults, OCR off, the sheet coordinate frame, no `PDF_REQUEST_*` flags, and a bold weight threshold of 600. A page list is a set: numbers are 1-based, validated against the document, deduplicated, and returned in document order. An empty selection means all pages. The detector has its own optional page selection.
 
@@ -115,18 +113,17 @@ Initialize requests with `pdf_inspector_request_init`. NULL requests have the sa
 | `PDF_OUT_TEXT` | Plain native text grouped into lines, per page and document |
 | `PDF_OUT_ITEMS` | Native positioned runs, including font family/tag, weight class, bold provenance, fixed pitch, styles, URI and Dest/GoTo links (`dest_page`), MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
 | `PDF_OUT_STRUCTURE` | Tagged structure references joined to items through `(page, mcid)` |
-| `PDF_OUT_GEOMETRY` | Native path rectangles, line segments, column intervals, chart boxes, and large-image regions |
+| `PDF_OUT_GEOMETRY` | Native path rectangles, line segments, column intervals, and chart boxes |
 | `PDF_OUT_RENDER` | Page pixels, dimensions, stride, format, and coordinate transforms |
-| `PDF_OUT_ANALYSIS` | Native layout/quality assessment, OCR reasons, per-page encoding-issue flags, and native text-quality numbers, without text or Markdown output |
-| `PDF_OUT_TABLES` | Automatically detected native tables (data and TOC) with logical cell matrices, detector bands, and outer bounds, plus any explicit table queries |
+| `PDF_OUT_ANALYSIS` | Native layout assessment, OCR reasons, and per-page encoding-issue flags, without text or Markdown output |
 
-Inspection accompanies every execution. Native text/items preserve the PDF's extraction evidence. Page provenance describes final Markdown. Page flags distinguish native OCR recommendations, actual recognition, native recovery (`PDF_PAGE_NATIVE_RECOVERED`: recommended for OCR but not routed), tables, columns, gid-encoded fonts, skipped invisible text, and hosted-processing recommendations. `reading_order` is `PDF_READING_SINGLE`, `PDF_READING_TABULAR`, or `PDF_READING_NEWSPAPER`. `text_orientation` is `PDF_ORIENTATION_UNKNOWN` until positioned content is parsed (items, text, geometry, or tables), then `PDF_ORIENTATION_UPRIGHT`, or `PDF_ORIENTATION_CCW` / `PDF_ORIENTATION_CW` for pages whose text operators predominantly read bottom-to-top / top-to-bottom. `PdfPage.quality` carries native-layer counts and the same 0–1 score OCR fusion uses for a native candidate, filled when items, geometry, text, Markdown, or analysis already ran. `PDF_DOC_OCR_RECOMMENDED` is the detector's document-level OCR advice and is not the same as per-page `PDF_PAGE_NEEDS_OCR`. Table flags incorporate tables found in final OCR Markdown as well as native layout evidence.
+Inspection accompanies every execution. Native text/items preserve the PDF's extraction evidence. Page provenance describes final Markdown. Page flags distinguish native OCR recommendations, actual recognition, native recovery (`PDF_PAGE_NATIVE_RECOVERED`: recommended for OCR but not routed), tables, columns, gid-encoded fonts, and hosted-processing recommendations. `reading_order` is `PDF_READING_SINGLE`, `PDF_READING_TABULAR`, or `PDF_READING_NEWSPAPER`. `text_orientation` is `PDF_ORIENTATION_UNKNOWN` until positioned content is parsed (items, text, or geometry), then `PDF_ORIENTATION_UPRIGHT`, or `PDF_ORIENTATION_CCW` / `PDF_ORIENTATION_CW` for pages whose text operators predominantly read bottom-to-top / top-to-bottom. `PDF_DOC_OCR_RECOMMENDED` is the detector's document-level OCR advice and is not the same as per-page `PDF_PAGE_NEEDS_OCR`. Table flags incorporate tables found in final OCR Markdown as well as native layout evidence.
 
 When positioned content is parsed, `result.cmap_gaps` reports each font whose upstream ToUnicode/CMap coverage had gaps. `codes` counts shown codes, `interpolated` counts one-code gaps recovered from neighboring mappings, and `unmapped` counts codes left undecoded. Any unmapped code sets `PDF_DOC_ENCODING_ISSUES`; an empty collection means no gap was observed in the parsed content, not that no text was requested.
 
-Without `PDF_REQUEST_INCLUDE_INVISIBLE`, pages that dropped Tr-mode-3 text set `PDF_PAGE_SKIPPED_INVISIBLE`; those runs are recovered by setting the flag and executing again.
+Text drawn with render mode 3 (invisible) is skipped unless `PDF_REQUEST_INCLUDE_INVISIBLE` is set; positioned outputs, plain text, and region queries then include it.
 
-`PDF_OUT_ANALYSIS` is also marked present when Markdown or OCR processing requires it. When absent, unset layout/quality flags mean unassessed, not a clean bill of health. `PDF_PAGE_ENCODING_ISSUES` identifies pages whose OCR reasons report suspected garbled text; `PDF_DOC_ENCODING_ISSUES` aggregates selected pages. Analysis-only requests publish neither Markdown nor text. Native quality numbers (`PdfPageQuality`) are filled when items, text, Markdown, geometry, or analysis are requested.
+`PDF_OUT_ANALYSIS` is also marked present when Markdown or OCR processing requires it. When absent, unset layout/quality flags mean unassessed, not a clean bill of health. `PDF_PAGE_ENCODING_ISSUES` identifies pages whose OCR reasons report suspected garbled text; `PDF_DOC_ENCODING_ISSUES` aggregates selected pages. Analysis-only requests publish neither Markdown nor text.
 
 The document Markdown is the selected pages' Markdown in order, separated by blank lines, with `<!-- Page N -->` markers when `PDF_MD_PAGE_NUMBERS` is set. Native OCR returns the core pipeline's document Markdown instead.
 
@@ -138,22 +135,20 @@ PdfResult (published pointer)
 |   +-- OCR reasons, provenance, warnings
 |   +-- optional rendered image
 +-- regions[]
-+-- tables[] -> cells[]
++-- tables[] -> cells[] (one per request.tables entry)
 +-- structure_nodes[] -> content references[]
 +-- cmap_gaps[] -> per-font CMap coverage
 ```
 
-`present` contains the available requested projections. NULL views denote absence; non-NULL views with length zero denote present empty data. Strings are UTF-8, are not NUL-terminated, and can contain embedded NULs. Use their lengths rather than `strlen`. Array lengths are `size_t`; indices, counts, and table row/column positions are `uint32_t` and zero-based; page numbers are always 1-based.
+`present` contains the available requested projections; `tables` is populated whenever `request.tables` is non-empty. NULL views denote absence; non-NULL views with length zero denote present empty data. Strings are UTF-8, are not NUL-terminated, and can contain embedded NULs. Use their lengths rather than `strlen`. Array lengths are `size_t`; indices, counts, and table row/column positions are `uint32_t` and zero-based; page numbers are always 1-based.
 
 ## Regions, tables, and composition
 
 `request.regions` batches text, table, and vector-grid queries. Each descriptor supplies its own page and rectangle; this batch is independent of the output page selection and preserves descriptor order. Text and table queries are executed as one core call per kind. A text/table result includes text and OCR-routing information. A grid result has `PDF_REGION_GRID_FOUND` only when a reliable grid was detected, with structure tokens and cell boxes. No grid is a successful empty result.
 
-`request.tables` accepts TSR structure-token arrays and cell quadrilaterals. Tokens use the upstream TSR vocabulary, including `<td></td>` or split `<td`, attribute, `>` tokens. Before the core's lenient parser sees them, the adapter requires one cell quadrilateral per cell tag, integer `rowspan`/`colspan` values, `colspan` within the core's 25-column limit, and `rowspan` within the declared row count. `PDF_TSR_STRICT` returns resolved cells and their Markdown. `PDF_TSR_AUTO` applies upstream quality repair and heuristic fallback, reporting its reason. When a fallback or repair changes the cells, the cell array is empty rather than describing a different table from the returned Markdown. All hinted tables are resolved with at most two core calls.
+`request.tables` accepts TSR structure-token arrays and cell quadrilaterals. Tokens use the upstream TSR vocabulary, including `<td></td>` or split `<td`, attribute, `>` tokens. Before the core's lenient parser sees them, the adapter requires one cell quadrilateral per cell tag, integer `rowspan`/`colspan` values, `colspan` within the core's 25-column limit, and `rowspan` within the declared row count. `PDF_TSR_STRICT` returns resolved cells and their Markdown. `PDF_TSR_AUTO` applies upstream quality repair and heuristic fallback, reporting its reason. When a fallback or repair changes the cells, the cell array is empty rather than describing a different table from the returned Markdown. All table queries are resolved with at most two core calls.
 
-With `PDF_OUT_TABLES`, `result.tables` starts with automatically detected native tables for the selected pages, including tables of contents (`PDF_TABLE_TOC`; data tables are `PDF_TABLE_DATA`). These tables contain the detector's logical cell matrix, formatted Markdown, row/column band edges, and an outer box marked `PDF_TABLE_HAS_BOUNDS` when those bands exist. Formatting may clean empty rows or cells. Automatic results still leave `PDF_CELL_HAS_BOUNDS` and `PDF_CELL_SPAN_KNOWN` unset: matrix entries use unit spans and do not claim header semantics. Do not interpret zero cell bounds as measured geometry.
-
-Explicit table-query results follow automatic detections in input order, carry `PDF_TABLE_FROM_HINT`, and identify their descriptor through `input_index`. Their table bounds and resolved cell geometry/spans are marked available. Explicit queries remain independent of the output page selection and run even without `PDF_OUT_TABLES`; the result marks that collection present. If both automatic detection and explicit queries cover the same table, both pieces of evidence are returned, distinguished by origin. The automatic collection is native extraction evidence; OCR-discovered table presence is reflected in page flags, not synthesized native cells.
+`result.tables` answers `request.tables` one to one, in input order: each entry echoes the query's page and bounds and carries resolved cells with measured bounds and spans (`PDF_CELL_HEADER` marks header cells). Table queries are independent of the output page selection. There is no automatic table extraction through the C interface; native table presence is reported in page flags (`PDF_PAGE_HAS_TABLES`, from native layout evidence and final OCR Markdown), and region table queries read a known table area.
 
 `pdf_inspector_compose_text` converts plain UTF-8 text; `pdf_inspector_compose_items` converts a `PdfComposeInput` of positioned items, which requires page dimensions and accepts rectangles, lines, and structure-role references. Both take `PdfMarkdownOptions` (initialize with `pdf_inspector_markdown_options_init`; NULL means the core defaults), return an independently owned Markdown result, and never modify their input. Item composition ignores `dest_page`; only `link` reaches the Markdown pipeline.
 

@@ -211,7 +211,7 @@ fn document_calls_can_move_between_threads() {
                 let mut out = null_mut();
                 let mut err = null_mut();
                 let mut r = input::default_request();
-                r.outputs |= PDF_OUT_ITEMS | PDF_OUT_STRUCTURE | PDF_OUT_TABLES;
+                r.outputs |= PDF_OUT_ITEMS | PDF_OUT_STRUCTURE;
                 assert_success(
                     pdf_inspector_execute(address as *const PdfDocument, &r, &mut out, &mut err),
                     err,
@@ -541,7 +541,8 @@ fn positioned_results_forward_upstream_cmap_gap_coverage() {
     let mut request = input::default_request();
     request.outputs = PDF_OUT_ITEMS;
     let result = doc.run(&request);
-    let gaps = unsafe { input::slice(result.get().cmap_gaps.ptr, result.get().cmap_gaps.len).unwrap() };
+    let gaps =
+        unsafe { input::slice(result.get().cmap_gaps.ptr, result.get().cmap_gaps.len).unwrap() };
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].codes, 4);
     assert_eq!(gaps[0].interpolated, 1);
@@ -697,7 +698,7 @@ fn predominantly_rotated_text_reports_orientation() {
         doc.run(&r).pages()[0].text_orientation,
         PDF_ORIENTATION_UNKNOWN
     );
-    for outputs in [PDF_OUT_ITEMS, PDF_OUT_TABLES] {
+    for outputs in [PDF_OUT_ITEMS, PDF_OUT_GEOMETRY] {
         r.outputs = outputs;
         assert_eq!(doc.run(&r).pages()[0].text_orientation, PDF_ORIENTATION_CCW);
     }
@@ -853,7 +854,6 @@ fn inspection_forwards_routing_sample_stats_and_load_audit() {
     assert_eq!(info.audit.flags & PDF_LOAD_LEADING_BYTES, 0);
     assert_eq!(info.audit.flags & PDF_LOAD_DECRYPTED, 0);
     let page = &result.pages()[0];
-    assert_eq!(page.quality.alphanumeric_chars, 0);
     assert_eq!(page.columns.len, 0);
 }
 
@@ -886,16 +886,12 @@ fn document_info_exposes_sheet_pages_and_audit() {
 }
 
 #[test]
-fn analysis_forwards_native_quality_numbers() {
+fn analysis_forwards_layout_and_reading_order() {
     let doc = Doc::open("bare_name_struct");
     let mut r = input::default_request();
     r.outputs = PDF_OUT_ANALYSIS | PDF_OUT_ITEMS;
     let result = doc.run(&r);
     let page = &result.pages()[0];
-    assert!(page.quality.alphanumeric_chars > 0);
-    assert!(page.quality.visible_chars >= page.quality.alphanumeric_chars);
-    assert!(page.quality.density > 0.0);
-    assert!(page.quality.score > 0.0);
     assert_eq!(page.reading_order, PDF_READING_SINGLE);
     assert_eq!(page.flags & PDF_PAGE_HAS_COLUMNS, 0);
     let columns = unsafe { input::slice(page.columns.ptr, page.columns.len).unwrap() };
@@ -906,34 +902,13 @@ fn analysis_forwards_native_quality_numbers() {
 }
 
 #[test]
-fn quality_view_forwards_metrics() {
-    let metrics = pdf_inspector::text_quality_metrics("Hello world");
-    let view = super::output::quality_view(metrics);
-    assert_eq!(view.alphanumeric_chars, metrics.alphanumeric_chars);
-    assert_eq!(view.visible_chars, metrics.visible_chars);
-    assert_eq!(view.density, metrics.density);
-    assert_eq!(view.replacement_chars, metrics.replacement_chars);
-    assert_eq!(
-        view.longest_replacement_run,
-        metrics.longest_replacement_run
-    );
-    assert_eq!(view.english_cosine, metrics.english_cosine);
-    assert_eq!(view.score, metrics.score);
-    assert!(view.alphanumeric_chars > 0);
-    assert!(view.score > 0.0);
-}
-
-#[test]
-fn intervals_and_floats_are_stored() {
+fn intervals_are_stored() {
     let storage = super::output::Storage::default();
     let columns = storage.slice::<PdfIntervals>(vec![PdfInterval { x0: 10.0, x1: 40.0 }]);
     let columns = unsafe { input::slice(columns.ptr, columns.len).unwrap() };
     assert_eq!(columns.len(), 1);
     assert_eq!(columns[0].x0, 10.0);
     assert_eq!(columns[0].x1, 40.0);
-    let edges = storage.slice::<PdfFloats>(vec![1.0, 2.5, 4.0]);
-    let edges = unsafe { input::slice(edges.ptr, edges.len).unwrap() };
-    assert_eq!(edges, [1.0, 2.5, 4.0]);
 }
 
 fn compose_one_item(info: &PdfPageInfo, item: &PdfItem) -> PdfComposeInput {
@@ -1180,6 +1155,122 @@ fn display_frame_turns_with_inherited_rotate() {
 }
 
 #[test]
+fn display_frame_moves_path_geometry_with_items() {
+    for rotation in [0, 90, 180, 270] {
+        let mut source =
+            lopdf::Document::load("../tests/fixtures/cropbox_offset_origin.pdf").unwrap();
+        source
+            .get_object_mut((2, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", rotation);
+        // A filled rectangle and a stroked segment beside the text run.
+        source
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(
+                b"120 300 60 20 re f 120 280 m 180 280 l S \
+                  BT /F1 12 Tf 120 350 Td (Visible glyph) Tj ET"
+                    .to_vec(),
+            );
+        let doc = open(source);
+        let mut r = input::default_request();
+        r.outputs = PDF_OUT_ITEMS | PDF_OUT_GEOMETRY;
+        r.frame = PDF_FRAME_SHEET;
+        let sheet = doc.run(&r);
+        r.frame = PDF_FRAME_DISPLAY;
+        let display = doc.run(&r);
+        let (sp, dp) = (&sheet.pages()[0], &display.pages()[0]);
+        let srects = unsafe { input::slice(sp.rectangles.ptr, sp.rectangles.len).unwrap() };
+        let drects = unsafe { input::slice(dp.rectangles.ptr, dp.rectangles.len).unwrap() };
+        let slines = unsafe { input::slice(sp.lines.ptr, sp.lines.len).unwrap() };
+        let dlines = unsafe { input::slice(dp.lines.ptr, dp.lines.len).unwrap() };
+        assert_eq!((srects.len(), slines.len()), (1, 1), "rotation {rotation}");
+        assert_eq!((drects.len(), dlines.len()), (1, 1), "rotation {rotation}");
+        let (sr, dr) = (srects[0].bounds, drects[0].bounds);
+        let (sw, sh) = (sr.x1 - sr.x0, sr.y1 - sr.y0);
+        let (dw, dh) = (dr.x1 - dr.x0, dr.y1 - dr.y0);
+        let quarter = rotation == 90 || rotation == 270;
+        let expected = if quarter { (sh, sw) } else { (sw, sh) };
+        assert!(
+            (dw - expected.0).abs() < 0.01 && (dh - expected.1).abs() < 0.01,
+            "rotation {rotation}: {sr:?} -> {dr:?}"
+        );
+        assert!(
+            dr.x0 >= 0.0
+                && dr.y0 >= 0.0
+                && dr.x1 <= dp.info.width + 0.01
+                && dr.y1 <= dp.info.height + 0.01,
+            "rotation {rotation}: {dr:?} outside {:?}",
+            (dp.info.width, dp.info.height)
+        );
+        let (start, end) = (dlines[0].start, dlines[0].end);
+        let horizontal = (start.y - end.y).abs() < 0.01;
+        assert_eq!(
+            horizontal, !quarter,
+            "rotation {rotation}: {start:?} {end:?}"
+        );
+        // The rectangle keeps its place relative to the text run.
+        let sitems = unsafe { input::slice(sp.items.ptr, sp.items.len).unwrap() };
+        let ditems = unsafe { input::slice(dp.items.ptr, dp.items.len).unwrap() };
+        let si = sitems
+            .iter()
+            .find(|i| unsafe { string(i.text) }.contains("Visible"))
+            .unwrap();
+        let di = ditems
+            .iter()
+            .find(|i| unsafe { string(i.text) }.contains("Visible"))
+            .unwrap();
+        let sheet_gap = (sr.y0 - si.bounds.y1, sr.x0 - si.bounds.x0);
+        let display_gap = match rotation {
+            0 => (dr.y0 - di.bounds.y1, dr.x0 - di.bounds.x0),
+            90 => (di.bounds.x0 - dr.x1, dr.y0 - di.bounds.y0),
+            180 => (di.bounds.y0 - dr.y1, di.bounds.x1 - dr.x1),
+            _ => (dr.x0 - di.bounds.x1, di.bounds.y1 - dr.y1),
+        };
+        assert!(
+            (sheet_gap.0 - display_gap.0).abs() < 0.01
+                && (sheet_gap.1 - display_gap.1).abs() < 0.01,
+            "rotation {rotation}: sheet gap {sheet_gap:?}, display gap {display_gap:?}"
+        );
+    }
+}
+
+#[test]
+fn invisible_text_is_opt_in() {
+    let mut source = lopdf::Document::load("../tests/fixtures/cropbox_offset_origin.pdf").unwrap();
+    source
+        .get_object_mut((4, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_content(
+            b"BT /F1 12 Tf 3 Tr 120 350 Td (Hidden layer) Tj 0 Tr 0 -40 Td (Shown) Tj ET".to_vec(),
+        );
+    let doc = open(source);
+    let mut r = input::default_request();
+    r.outputs = PDF_OUT_ITEMS | PDF_OUT_TEXT;
+    let texts = |result: &Owned| {
+        let page = &result.pages()[0];
+        unsafe { input::slice(page.items.ptr, page.items.len).unwrap() }
+            .iter()
+            .map(|i| unsafe { string(i.text) })
+            .collect::<Vec<_>>()
+    };
+    let skipped = doc.run(&r);
+    assert!(texts(&skipped).iter().any(|t| t.contains("Shown")));
+    assert!(!texts(&skipped).iter().any(|t| t.contains("Hidden")));
+    assert!(!unsafe { string(skipped.get().text) }.contains("Hidden"));
+    r.flags |= PDF_REQUEST_INCLUDE_INVISIBLE;
+    let included = doc.run(&r);
+    assert!(texts(&included).iter().any(|t| t.contains("Hidden")));
+    assert!(unsafe { string(included.get().text) }.contains("Hidden"));
+}
+
+#[test]
 fn external_ocr_needs_no_bitmap_or_native_backend() {
     let doc = Doc::open("scan_with_native_header_text");
     let span = PdfOcrSpan {
@@ -1287,15 +1378,14 @@ fn region_batch_order_and_tsr_validation() {
         len: 1,
     };
     let result = doc.run(&r);
+    assert_eq!(result.get().tables.len, 1);
     let table_out = unsafe { &*result.get().tables.ptr };
-    assert_eq!(table_out.flags, PDF_TABLE_FROM_HINT | PDF_TABLE_HAS_BOUNDS);
-    assert_eq!(table_out.kind, PDF_TABLE_DATA);
-    assert_eq!(result.get().present & PDF_OUT_TABLES, PDF_OUT_TABLES);
+    assert_eq!((table_out.page, table_out.bounds.x1), (1, 500.0));
     assert_eq!(table_out.cells.len, 1);
-    assert_eq!(
-        unsafe { (*table_out.cells.ptr).flags } & (PDF_CELL_HAS_BOUNDS | PDF_CELL_SPAN_KNOWN),
-        PDF_CELL_HAS_BOUNDS | PDF_CELL_SPAN_KNOWN
-    );
+    let cell = unsafe { &*table_out.cells.ptr };
+    assert_eq!(cell.flags & !PDF_CELL_HEADER, 0);
+    assert_eq!((cell.row_span, cell.column_span), (1, 1));
+    assert!(cell.bounds.x1 > cell.bounds.x0 && cell.bounds.y1 > cell.bounds.y0);
     assert!(unsafe { string((*table_out.cells.ptr).text) }.contains("Test"));
     table.cells.len = 0;
     r.tables.ptr = &table;
@@ -1349,7 +1439,7 @@ fn region_batch_order_and_tsr_validation() {
     r.tables.ptr = &table;
     let result = doc.run(&r);
     let table_out = unsafe { &*result.get().tables.ptr };
-    assert_eq!(table_out.input_index, 0);
+    assert_eq!(table_out.page, 1);
     assert!(!unsafe { string(table_out.markdown) }.is_empty());
 }
 
@@ -1496,14 +1586,13 @@ fn emit_c_layout_contract() {
     record!(PdfComposeInput; pages, items, rectangles, lines, structure);
     record!(PdfImage; width, height, stride, format, pixels, pixel_to_page, page_to_pixel);
     record!(PdfProvenance; source, flags, confidence, render_dpi, render_ms, ocr_ms, assembly_ms, model, model_revision, warnings);
-    record!(PdfPageQuality; alphanumeric_chars, visible_chars, density, replacement_chars, longest_replacement_run, english_cosine, score);
     record!(PdfInterval; x0, x1);
     record!(PdfLoadAudit; flags, leading_bytes, widened_form_bboxes, saturated_bbox_numerals);
     record!(PdfCMapGap; font, codes, interpolated, unmapped);
-    record!(PdfPage; info, flags, reading_order, text_orientation, quality, markdown, text, ocr_reasons, items, columns, charts, image_regions, structure, rectangles, lines, image, provenance);
+    record!(PdfPage; info, flags, reading_order, text_orientation, markdown, text, ocr_reasons, items, columns, charts, structure, rectangles, lines, image, provenance);
     record!(PdfCell; row, column, row_span, column_span, flags, bounds, text);
     record!(PdfRegion; page, kind, flags, bounds, text, ocr_reason, tokens, cells);
-    record!(PdfTable; page, flags, input_index, kind, bounds, markdown, fallback_reason, column_edges, row_edges, cells);
+    record!(PdfTable; page, bounds, markdown, fallback_reason, cells);
     record!(PdfResult; present, pdf_type, page_count, confidence, flags, pages_sampled, pages_with_text, processing_ms, title, markdown, text, pages, regions, tables, structure_nodes, cmap_gaps);
     record!(PdfError; status, message);
     record!(PdfDocumentInfo; page_count, audit, pages);
@@ -1512,7 +1601,6 @@ fn emit_c_layout_contract() {
     record!(PdfQuads; ptr, len);
     record!(PdfBoxes; ptr, len);
     record!(PdfIntervals; ptr, len);
-    record!(PdfFloats; ptr, len);
     record!(PdfItems; ptr, len);
     record!(PdfPageInfos; ptr, len);
     record!(PdfStructureElements; ptr, len);

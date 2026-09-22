@@ -844,11 +844,6 @@ fn is_parallel_prose_table(table: &crate::tables::Table) -> bool {
 #[derive(Clone, Copy)]
 enum TableOutputMode {
     Markdown,
-    /// Collect every accepted data table (TOCs excluded) instead of
-    /// rendering Markdown.
-    DataTables,
-    /// Collect every accepted table, including TOCs.
-    LayoutTables,
     #[cfg(feature = "vision")]
     CompleteTables,
 }
@@ -858,6 +853,7 @@ struct TableDetectionOutput {
     pages_with_detected_tables: HashSet<u32>,
     pages_with_tables: HashSet<u32>,
     markdown_by_page: HashMap<u32, Vec<PositionedMarkdown>>,
+    #[cfg(feature = "vision")]
     complete_tables: Vec<(u32, crate::tables::Table)>,
 }
 
@@ -868,6 +864,7 @@ impl TableDetectionOutput {
             pages_with_detected_tables: HashSet::new(),
             pages_with_tables: HashSet::new(),
             markdown_by_page: HashMap::new(),
+            #[cfg(feature = "vision")]
             complete_tables: Vec::new(),
         }
     }
@@ -879,7 +876,7 @@ impl TableDetectionOutput {
         chart_order: Option<ChartProseOrder>,
     ) {
         self.pages_with_detected_tables.insert(page);
-        let collect = match self.mode {
+        match self.mode {
             TableOutputMode::Markdown => {
                 self.pages_with_tables.insert(page);
                 self.markdown_by_page
@@ -891,16 +888,14 @@ impl TableDetectionOutput {
                         crate::tables::table_to_markdown(table),
                         chart_order,
                     ));
-                return;
             }
-            TableOutputMode::DataTables => table.kind == crate::tables::TableKind::Data,
-            TableOutputMode::LayoutTables => true,
             #[cfg(feature = "vision")]
-            TableOutputMode::CompleteTables => crate::tables::is_complete_data_table(table),
-        };
-        if collect {
-            self.pages_with_tables.insert(page);
-            self.complete_tables.push((page, table.clone()));
+            TableOutputMode::CompleteTables => {
+                if crate::tables::is_complete_data_table(table) {
+                    self.pages_with_tables.insert(page);
+                    self.complete_tables.push((page, table.clone()));
+                }
+            }
         }
     }
 
@@ -916,6 +911,7 @@ impl TableDetectionOutput {
 #[derive(Default)]
 struct MarkdownConversionOutput {
     markdown: String,
+    #[cfg(feature = "vision")]
     detected_tables: Vec<(u32, crate::tables::Table)>,
 }
 
@@ -1436,7 +1432,6 @@ pub fn to_markdown_from_items_with_rects_and_page_count(
     )
 }
 
-/// Document-level evidence supplied to positioned-item Markdown conversion.
 pub struct MarkdownDocumentContext<'a> {
     pub page_thresholds: &'a HashMap<u32, f32>,
     pub struct_roles: Option<&'a HashMap<u32, HashMap<i64, crate::structure_tree::StructRole>>>,
@@ -1474,48 +1469,6 @@ pub fn to_markdown_from_items_with_rects_and_lines(
         TableOutputMode::Markdown,
     )
     .markdown
-}
-
-/// Run the ordinary Markdown table pipeline and return the accepted data
-/// tables (TOCs excluded) instead of Markdown. Detector row/column positions
-/// are not a cell-box contract; the cell matrices are the extraction evidence.
-pub fn detect_data_tables_from_items(
-    items: Vec<TextItem>,
-    options: MarkdownOptions,
-    rects: &[crate::types::PdfRect],
-    pdf_lines: &[crate::types::PdfLine],
-    context: MarkdownDocumentContext<'_>,
-) -> Vec<(u32, crate::tables::Table)> {
-    convert_items_with_rects_lines_and_table_output(
-        items,
-        options,
-        rects,
-        pdf_lines,
-        context,
-        TableOutputMode::DataTables,
-    )
-    .detected_tables
-}
-
-/// Run the ordinary Markdown table pipeline and return every accepted table,
-/// including tables of contents. Detector row/column positions are not a
-/// cell-box contract; the cell matrices are the extraction evidence.
-pub fn detect_tables_from_items(
-    items: Vec<TextItem>,
-    options: MarkdownOptions,
-    rects: &[crate::types::PdfRect],
-    pdf_lines: &[crate::types::PdfLine],
-    context: MarkdownDocumentContext<'_>,
-) -> Vec<(u32, crate::tables::Table)> {
-    convert_items_with_rects_lines_and_table_output(
-        items,
-        options,
-        rects,
-        pdf_lines,
-        context,
-        TableOutputMode::LayoutTables,
-    )
-    .detected_tables
 }
 
 /// Run the ordinary Markdown table pipeline but return only structurally
@@ -2178,7 +2131,9 @@ fn convert_items_with_rects_lines_and_table_output(
         }
     }
 
+    #[cfg(feature = "vision")]
     let mut detected_tables = table_output.complete_tables;
+    #[cfg(feature = "vision")]
     detected_tables.sort_by_key(|(page, _)| *page);
     let mut page_tables = table_output.markdown_by_page;
 
@@ -2450,6 +2405,7 @@ fn convert_items_with_rects_lines_and_table_output(
     );
     MarkdownConversionOutput {
         markdown,
+        #[cfg(feature = "vision")]
         detected_tables,
     }
 }
