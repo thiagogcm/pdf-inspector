@@ -1,25 +1,27 @@
 use super::output::narrow;
 use super::*;
-use lopdf::{Document, ObjectId};
+use lopdf::ObjectId;
 use pdf_inspector::structure_tree::{StructElement, StructTree};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-pub(super) fn nodes(s: &Storage, doc: &Document, selected: &[u32]) -> PdfStructureNodes {
+pub(super) fn nodes(
+    s: &Storage,
+    tree: &StructTree,
+    pages: &BTreeMap<u32, ObjectId>,
+    selected: &[u32],
+) -> PdfStructureNodes {
     let mut out = Vec::new();
-    if let Some(tree) = StructTree::from_doc(doc) {
-        let pages = doc.get_pages();
-        let scope = Scope {
-            pages: pages.into_iter().map(|(page, id)| (id, page)).collect(),
-            selected: selected.iter().copied().collect(),
-            full: selected.len() == doc.get_pages().len(),
-        };
-        let mut kept = HashSet::new();
-        for node in &tree.children {
-            scope.mark(node, &mut kept);
-        }
-        for node in &tree.children {
-            scope.emit(s, node, 0, &kept, &mut out);
-        }
+    let scope = Scope {
+        pages: pages.iter().map(|(page, id)| (*id, *page)).collect(),
+        selected: selected.iter().copied().collect(),
+        full: selected.len() == pages.len(),
+    };
+    let mut kept = HashSet::new();
+    for node in &tree.children {
+        scope.mark(node, &mut kept);
+    }
+    for node in &tree.children {
+        scope.emit(s, node, 0, &kept, &mut out);
     }
     s.slice(out)
 }
