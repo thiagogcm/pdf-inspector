@@ -5,6 +5,9 @@ use super::output::{flip_box, flip_point, narrow, orientation};
 use super::*;
 use lopdf::Document;
 
+use lopdf::ObjectId;
+use pdf_inspector::detector::PdfTypeResult;
+use pdf_inspector::structure_tree::StructTree;
 use pdf_inspector::vision::{
     FusedPageMarkdown, ImagePoint, ImageQuad, ModelIdentity, OcrPage, OcrRun, OcrSpan,
     PageContentSource, PageTransform, RenderPixelFormat, RenderedPage, RoutedOcrPage,
@@ -13,18 +16,52 @@ use pdf_inspector::{
     DetectionConfig, PageMarkdown, PageRotation, PositionFrame, PositionOptions, ScanStrategy,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::OnceLock;
 use std::time::Instant;
 
-/// Immutable document bytes (decrypted once when a password opened them)
-/// plus per-page frames cached at open. Processing runs the core's
-/// byte-oriented API against `bytes`; the core re-applies its load repairs on
-/// every parse, so only decryption has to be written back.
+/// The loaded document (decrypted once when a password opened it), its
+/// serialized bytes, and per-page frames cached at open. Everything the core
+/// reads from a `Document` runs against `doc`; the core's byte-oriented
+/// entry points reparse `bytes`, re-applying the loader's repairs each time,
+/// so only decryption has to be written back. Request-independent work
+/// (default inspection, the structure tree) is computed once, lazily.
 pub(super) struct DocumentState {
     bytes: Vec<u8>,
+    doc: Document,
+    /// 1-indexed page numbers to page objects.
+    pages: BTreeMap<u32, ObjectId>,
     frames: Vec<PageFrame>,
     pub(super) info: PdfDocumentInfo,
     /// Backs `info.pages`.
     _storage: Storage,
+    default_inspection: OnceLock<PdfTypeResult>,
+    structure: OnceLock<Option<StructTree>>,
+}
+/// Executions share one document across threads: the parsed document and
+/// the lazily filled caches must be shareable. (`info` and its arena are
+/// written at open and only read afterwards.)
+const _: () = {
+    const fn shared<T: Send + Sync>() {}
+    shared::<(
+        Document,
+        OnceLock<PdfTypeResult>,
+        OnceLock<Option<StructTree>>,
+    )>()
+};
+/// Inspection for one execution: the document's cached default, or a fresh
+/// run for a non-default detection configuration.
+enum Inspection<'a> {
+    Cached(&'a PdfTypeResult),
+    Fresh(PdfTypeResult),
+}
+impl std::ops::Deref for Inspection<'_> {
+    type Target = PdfTypeResult;
+    fn deref(&self) -> &PdfTypeResult {
+        match self {
+            Inspection::Cached(r) => r,
+            Inspection::Fresh(r) => r,
+        }
+    }
 }
 impl DocumentState {
     pub(super) fn open(bytes: Vec<u8>, password: Option<&str>) -> Fallible<Self> {
@@ -50,19 +87,21 @@ impl DocumentState {
         if repairs.saturated_bbox_numerals > 0 {
             flags |= PDF_LOAD_SATURATED_BBOX;
         }
-        let frames = PageFrame::all(&doc);
-        let bytes = if encrypted {
+        let (bytes, doc) = if encrypted {
             doc.encryption_state = None;
             doc.trailer.remove(b"Encrypt");
             let mut decrypted = Vec::new();
             doc.save_to(&mut decrypted).map_err(|e| {
                 Failure::parse(format!("could not serialize decrypted document: {e}"))
             })?;
-            pdf_inspector::load_document_from_mem_with_password(&decrypted, None)?;
-            decrypted
+            // Keep the document as later byte parses will see it.
+            let reloaded = pdf_inspector::load_document_from_mem_with_password(&decrypted, None)?.0;
+            (decrypted, reloaded)
         } else {
-            bytes
+            (bytes, doc)
         };
+        let pages = doc.get_pages();
+        let frames = PageFrame::all(&doc);
         let storage = Storage::default();
         let info = PdfDocumentInfo {
             page_count: narrow(frames.len()),
@@ -76,16 +115,42 @@ impl DocumentState {
         };
         Ok(Self {
             bytes,
+            doc,
+            pages,
             frames,
             info,
             _storage: storage,
+            default_inspection: OnceLock::new(),
+            structure: OnceLock::new(),
         })
     }
     pub(super) fn count(&self) -> u32 {
         self.info.page_count
     }
-    fn document(&self) -> Fallible<Document> {
-        Ok(pdf_inspector::load_document_from_mem_with_password(&self.bytes, None)?.0)
+    /// Detector inspection under `options`. The default configuration is
+    /// run once per document; any other configuration runs per execution.
+    fn inspection(
+        &self,
+        options: PdfDetectionOptions,
+        config: DetectionConfig,
+    ) -> Fallible<Inspection<'_>> {
+        if !is_default_detection(options) {
+            let fresh = pdf_inspector::detect_pdf_type_mem_with_config(&self.bytes, config)?;
+            return Ok(Inspection::Fresh(fresh));
+        }
+        if let Some(cached) = self.default_inspection.get() {
+            return Ok(Inspection::Cached(cached));
+        }
+        let fresh = pdf_inspector::detect_pdf_type_mem_with_config(&self.bytes, config)?;
+        Ok(Inspection::Cached(
+            self.default_inspection.get_or_init(|| fresh),
+        ))
+    }
+    /// The tagged-PDF structure tree, parsed once; `None` for untagged files.
+    fn structure(&self) -> Option<&StructTree> {
+        self.structure
+            .get_or_init(|| StructTree::from_doc(&self.doc))
+            .as_ref()
     }
     pub(super) fn frame(&self, page: u32) -> Fallible<&PageFrame> {
         page.checked_sub(1)
@@ -150,7 +215,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
 
     // 1. Classification. Per-page analysis and Markdown come from the
     //    page-oriented passes below, so detection alone is enough here.
-    let inspection = pdf_inspector::detect_pdf_type_mem_with_config(&state.bytes, config)?;
+    let inspection = state.inspection(r.detection, config)?;
     let storage = Storage::default();
     let mut view = PdfResult {
         present: r.outputs | PDF_OUT_INSPECTION,
@@ -236,14 +301,10 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     // selected pages in the sheet frame; TEXT lines are grouped there so the
     // frame governs geometry, not line breaks, before geometry moves to the
     // display frame when requested.
-    let doc = if want_content || r.outputs & (PDF_OUT_STRUCTURE | PDF_OUT_ITEMS) != 0 {
-        Some(state.document()?)
-    } else {
-        None
-    };
+    let doc = &state.doc;
     let mut content: Option<PageContent> = None;
     let mut sheet_text: BTreeMap<u32, String> = BTreeMap::new();
-    if let (Some(doc), true) = (&doc, want_content) {
+    if want_content {
         let set = selected.iter().copied().collect::<HashSet<_>>();
         let mut parsed = super::content::parse(doc, &set, extraction)?;
         if r.outputs & PDF_OUT_TEXT != 0 {
@@ -265,10 +326,31 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         }
         content = Some(parsed);
     }
-    let elements = if r.outputs & PDF_OUT_STRUCTURE != 0 {
-        pdf_inspector::extract_structure_elements_mem(&state.bytes, Some(&selected))?
-    } else {
-        Vec::new()
+    // Marked-content roles of the selected pages, sorted by (page, mcid).
+    let elements: Vec<PdfStructureElement> = match (r.outputs & PDF_OUT_STRUCTURE != 0)
+        .then(|| state.structure())
+        .flatten()
+    {
+        Some(tree) => {
+            let mut elements = tree
+                .mcid_to_roles(&state.pages)
+                .into_iter()
+                .filter(|(page, _)| selected.contains(page))
+                .flat_map(|(page, roles)| {
+                    let storage = &storage;
+                    roles
+                        .into_iter()
+                        .map(move |(mcid, role)| PdfStructureElement {
+                            page,
+                            mcid,
+                            role: storage.bytes(role.name()),
+                        })
+                })
+                .collect::<Vec<_>>();
+            elements.sort_by_key(|e| (e.page, e.mcid));
+            elements
+        }
+        None => Vec::new(),
     };
     #[cfg(feature = "render-pdfium")]
     let mut rendered = if r.outputs & PDF_OUT_RENDER != 0 {
@@ -280,7 +362,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     }
     .into_iter();
 
-    let dest_links = if let (Some(doc), true) = (&doc, r.outputs & PDF_OUT_ITEMS != 0) {
+    let dest_links = if r.outputs & PDF_OUT_ITEMS != 0 {
         super::links::dest_items(&storage, doc, &selected, state, frame)
     } else {
         Vec::new()
@@ -449,13 +531,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             p.text_orientation = orientation(turned.unwrap_or(PageRotation::Upright));
         }
         if r.outputs & PDF_OUT_STRUCTURE != 0 {
-            p.structure = storage.slice(elements.iter().filter(|e| e.page == *number).map(|e| {
-                PdfStructureElement {
-                    page: e.page,
-                    mcid: e.mcid,
-                    role: storage.bytes(&e.role),
-                }
-            }));
+            p.structure = storage.slice(elements.iter().filter(|e| e.page == *number).copied());
         }
         #[cfg(feature = "render-pdfium")]
         if let Some(page) = rendered.next() {
@@ -484,8 +560,8 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         )?);
     }
     view.pages = storage.slice(page_views);
-    if let (Some(doc), true) = (&doc, r.outputs & PDF_OUT_STRUCTURE != 0) {
-        view.structure_nodes = super::semantic::nodes(&storage, doc, &selected);
+    if let (Some(tree), true) = (state.structure(), r.outputs & PDF_OUT_STRUCTURE != 0) {
+        view.structure_nodes = super::semantic::nodes(&storage, tree, &state.pages, &selected);
     }
     view.processing_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(ResultOwner::new(view, storage))
@@ -577,6 +653,16 @@ fn garbled(reasons: &[String]) -> bool {
     reasons
         .iter()
         .any(|reason| reason == pdf_inspector::OCR_REASON_SUSPECTED_GARBLED_TEXT)
+}
+/// True when `d` is what `pdf_inspector_request_init` sets, byte for byte in
+/// the scalar fields and with no explicit detector page list.
+fn is_default_detection(d: PdfDetectionOptions) -> bool {
+    let default = default_request().detection;
+    d.strategy == default.strategy
+        && d.sample_size == default.sample_size
+        && d.min_text_ops == default.min_text_ops
+        && d.text_page_ratio.to_bits() == default.text_page_ratio.to_bits()
+        && d.pages.len == 0
 }
 unsafe fn detection(d: PdfDetectionOptions, count: u32) -> Fallible<DetectionConfig> {
     ratio(d.text_page_ratio, "text-page ratio")?;

@@ -26,7 +26,7 @@ Run `c-api/scripts/generate-c-header.sh` after changing public C records or func
 
 The C adapter lives in `c-api/`, following the independent-crate layout of `napi/` and `wasm/`. It owns ABI records, pointers, handles, validation, result storage, exported symbols, the generated header, linker settings, and consumer tests. Its library is named `pdf_inspector_c` so its artifacts cannot overwrite the core/Python library. There is no root `c-api` feature or compatibility forwarding layer.
 
-The adapter runs the core's public API, exactly as the Node and Python bindings do, plus a handful of core internals that are only made visible. Each operation parses the retained bytes again; that is by design, and it keeps the core crate at upstream. The remaining core differences are:
+The adapter runs the core's public API, exactly as the Node and Python bindings do, plus a handful of core internals that are only made visible. Open parses the document once and keeps it: page frames, positioned runs and geometry, the structure tree, and Dest links are read from that document, and default-configuration inspection is computed once per document on first use. The core's byte-oriented entry points (per-page Markdown, region queries, table queries, OCR) reparse the retained bytes on every call; that is by design, and it keeps the core crate at upstream. The remaining core differences are:
 
 | Core change | Kind | Why it remains |
 | --- | --- | --- |
