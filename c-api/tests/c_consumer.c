@@ -8,8 +8,12 @@ _Static_assert(sizeof(((PdfRequest *)0)->flags) == 4, "request flags have a fixe
 _Static_assert(sizeof(((PdfError *)0)->status) == 4, "status has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->mcid) == 8, "MCID has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->dest_page) == 4, "dest_page has a fixed width");
+_Static_assert(sizeof(((PdfItem *)0)->fill_color) == 4, "fill_color has a fixed width");
+_Static_assert(sizeof(((PdfItem *)0)->stroke_color) == 4, "stroke_color has a fixed width");
+_Static_assert(sizeof(((PdfItem *)0)->render_mode) == 4, "render_mode has a fixed width");
 _Static_assert(sizeof(((PdfLoadAudit *)0)->flags) == 4, "audit flags have a fixed width");
 _Static_assert(sizeof(((PdfCell *)0)->row) == 4, "cell indices have a fixed width");
+_Static_assert(sizeof(((PdfMetadata *)0)->title) == sizeof(PdfBytes), "metadata title has PdfBytes size");
 
 static PdfBytes bytes(const char *s) {
     PdfBytes result = {(const uint8_t *)s, strlen(s)};
@@ -45,10 +49,12 @@ int main(void) {
     const PdfDocumentInfo *info = pdf_inspector_document_info(document);
     CHECK(info->page_count == 1 && info->pages.len == 1 && info->pages.ptr[0].page == 1);
     CHECK(info->audit.leading_bytes == 0);
+    CHECK(info->metadata.title.len == 0 || info->metadata.title.len > 0);
     request.outputs |= PDF_OUT_ITEMS | PDF_OUT_STRUCTURE | PDF_OUT_GEOMETRY | PDF_OUT_TEXT;
     CHECK(pdf_inspector_execute(document, &request, &first, &error) == PDF_OK);
     CHECK(first && !error);
     CHECK(first->page_count == 1 && first->pages.len == 1);
+    CHECK(first->metadata.title.len == 0 || first->metadata.title.len > 0);
     CHECK(contains(first->markdown, "# Test"));
     CHECK(contains(first->text, "Test"));
     const PdfPage *page = &first->pages.ptr[0];
@@ -56,6 +62,7 @@ int main(void) {
     CHECK((first->present & PDF_OUT_ANALYSIS) && first->structure_nodes.len > 0);
     CHECK(first->structure_nodes.ptr[0].parent == 0);
     CHECK(page->items.ptr[0].bounds.y1 >= page->items.ptr[0].bounds.y0);
+    CHECK(page->items.ptr[0].render_mode <= 7);
     CHECK(page->text_orientation == PDF_ORIENTATION_UPRIGHT);
 
     request.markdown.flags &= ~PDF_MD_HEADERS;

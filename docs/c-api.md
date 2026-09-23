@@ -38,6 +38,7 @@ The adapter runs the core's public API, exactly as the Node and Python bindings 
 | `extractor::{detect_columns, is_newspaper_layout, ColumnRegion, is_text_layout_item}`, `text_utils::effective_width` | visibility | Column intervals and newspaper vs tabular reading order |
 | `markdown::{MarkdownDocumentContext, to_markdown_from_items_with_rects_and_lines}` | visibility | Role-aware composition with line segments, without a document |
 | `structure_tree::StructRole::from_name` | visibility | Caller-supplied structure roles for composition |
+| `detector::{DocumentInfo, read_document_info}` | visibility | Read trailer document information metadata directly from Document at open |
 | `vision::cached_ocr_engine` | visibility | Runtime preparation warms the same process-cached OCR sessions |
 
 Every visibility change is a `pub(crate)` (or private) item made `pub`; no core signature, field, or behavior differs from upstream. The bug fix and the wrapper are candidates for upstream pull requests.
@@ -100,7 +101,7 @@ int main(int argc, char **argv) {
 
 `PDF_SOURCE_BYTES` accepts a PDF byte slice. `PDF_SOURCE_PATH` accepts a length-delimited UTF-8 path without embedded NULs. Open copies or reads the source before returning; the caller can then release its input memory or remove the source file. `PdfSource.password` supplies a UTF-8 password; an absent password (NULL pointer) uses the loader's empty-password behavior. A document that needed the password is decrypted once at open and retained in decrypted form, so every later operation works without it. The core loader's repairs (widened zero-area form `/BBox` entries, saturated overlong `/BBox` numerals, container rebuilds) are re-applied by every later parse, so only decryption is written back.
 
-`pdf_inspector_document_info` borrows the facts recorded at open: `page_count`, every page's sheet-frame dimensions and `/Rotate` in `pages`, and the load `audit` (decryption, leading bytes before `%PDF-`, widened form `/BBox` counts, and saturated `/BBox` numeral counts). The pointer stays valid until `pdf_inspector_document_free`. `pdf_inspector_version` returns the library version as static UTF-8.
+`pdf_inspector_document_info` borrows the facts recorded at open: `page_count`, every page's sheet-frame dimensions and `/Rotate` in `pages`, the load `audit` (decryption, leading bytes before `%PDF-`, widened form `/BBox` counts, and saturated `/BBox` numeral counts), and decoded trailer `/Info` metadata in `metadata`. The pointer stays valid until `pdf_inspector_document_free`. `pdf_inspector_version` returns the library version as static UTF-8.
 
 Initialize requests with `pdf_inspector_request_init`. NULL requests have the same defaults: all pages, inspection and document/page Markdown, upstream formatting and detection defaults, OCR off, the sheet coordinate frame, no `PDF_REQUEST_*` flags, and a bold weight threshold of 600. A page list is a set: numbers are 1-based, validated against the document, deduplicated, and returned in document order. An empty selection means all pages. The detector has its own optional page selection.
 
@@ -108,10 +109,10 @@ Initialize requests with `pdf_inspector_request_init`. NULL requests have the sa
 
 | Output flag | Projection |
 | --- | --- |
-| `PDF_OUT_INSPECTION` | Classification, confidence, title, page dimensions, OCR reasons, sample stats (`pages_sampled`, `pages_with_text`), and `PDF_DOC_*` flags |
+| `PDF_OUT_INSPECTION` | Classification, confidence, metadata (title, author, subject, keywords, creator, producer, creation_date, mod_date), page dimensions, OCR reasons, sample stats (`pages_sampled`, `pages_with_text`), and `PDF_DOC_*` flags |
 | `PDF_OUT_MARKDOWN` | Document and page Markdown, incorporating requested OCR fusion |
 | `PDF_OUT_TEXT` | Plain native text grouped into lines, per page and document |
-| `PDF_OUT_ITEMS` | Native positioned runs, including font family/tag, weight class, bold provenance, fixed pitch, styles, URI and Dest/GoTo links (`dest_page`), MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
+| `PDF_OUT_ITEMS` | Native positioned runs, including font family/tag, weight class, bold provenance, fixed pitch, paint fill and stroke colours, render mode, styles, URI and Dest/GoTo links (`dest_page`), MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
 | `PDF_OUT_STRUCTURE` | Tagged structure references joined to items through `(page, mcid)` |
 | `PDF_OUT_GEOMETRY` | Native path rectangles, line segments, column intervals, and chart boxes |
 | `PDF_OUT_RENDER` | Page pixels, dimensions, stride, format, and coordinate transforms |

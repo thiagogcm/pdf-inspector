@@ -806,6 +806,9 @@ fn sample_text_item() -> pdf_inspector::TextItem {
         font_weight: Some(700),
         bold_source: Some(pdf_inspector::BoldSource::FontName),
         fixed_pitch: Some(true),
+        fill_color: Some([0x12, 0x34, 0x56]),
+        stroke_color: Some([0x78, 0x9A, 0xBC]),
+        render_mode: Some(2),
         is_underline: false,
         is_strikeout: false,
         item_type: pdf_inspector::types::ItemType::Text,
@@ -821,17 +824,34 @@ fn item_view_copies_font_metadata() {
     assert_eq!(item.font_weight, 700);
     assert_eq!(item.bold_source, PDF_BOLD_FONT_NAME);
     assert_eq!(item.fixed_pitch, PDF_PITCH_FIXED);
+    assert_eq!(item.flags & PDF_HAS_FILL_COLOR, PDF_HAS_FILL_COLOR);
+    assert_eq!(item.fill_color, 0x123456);
+    assert_eq!(item.flags & PDF_HAS_STROKE_COLOR, PDF_HAS_STROKE_COLOR);
+    assert_eq!(item.stroke_color, 0x789ABC);
+    assert_eq!(item.flags & PDF_HAS_RENDER_MODE, PDF_HAS_RENDER_MODE);
+    assert_eq!(item.render_mode, PDF_RENDER_MODE_FILL_STROKE);
+
     let blank = pdf_inspector::TextItem {
         is_bold: false,
         font_weight: None,
         bold_source: None,
         fixed_pitch: None,
+        fill_color: None,
+        stroke_color: None,
+        render_mode: None,
         ..sample_text_item()
     };
     let item = storage.item(&blank, 100.0);
     assert_eq!(item.font_weight, 0);
     assert_eq!(item.bold_source, 0);
     assert_eq!(item.fixed_pitch, PDF_PITCH_UNKNOWN);
+    assert_eq!(
+        item.flags & (PDF_HAS_FILL_COLOR | PDF_HAS_STROKE_COLOR | PDF_HAS_RENDER_MODE),
+        0
+    );
+    assert_eq!(item.fill_color, 0);
+    assert_eq!(item.stroke_color, 0);
+    assert_eq!(item.render_mode, 0);
     assert_eq!(item.dest_page, 0);
 }
 
@@ -935,6 +955,18 @@ fn compose_reconstructs_font_metadata_fields() {
         super::output::parse_fixed_pitch(item.fixed_pitch).unwrap(),
         Some(true)
     );
+    assert_eq!(
+        super::output::parse_color(item.fill_color, "fill_color").unwrap(),
+        [0x12, 0x34, 0x56]
+    );
+    assert_eq!(
+        super::output::parse_color(item.stroke_color, "stroke_color").unwrap(),
+        [0x78, 0x9A, 0xBC]
+    );
+    assert_eq!(
+        super::output::parse_render_mode(item.render_mode).unwrap(),
+        2
+    );
     let info = PdfPageInfo {
         page: 1,
         width: 200.0,
@@ -951,6 +983,14 @@ fn compose_reconstructs_font_metadata_fields() {
     let mut bad = item;
     bad.font_weight = 50;
     let input = compose_one_item(&info, &bad);
+    assert_eq!(compose_err(&input, null()), PDF_INVALID_ARGUMENT);
+    let mut bad_color = item;
+    bad_color.fill_color = 0x01_000000;
+    let input = compose_one_item(&info, &bad_color);
+    assert_eq!(compose_err(&input, null()), PDF_INVALID_ARGUMENT);
+    let mut bad_mode = item;
+    bad_mode.render_mode = 8;
+    let input = compose_one_item(&info, &bad_mode);
     assert_eq!(compose_err(&input, null()), PDF_INVALID_ARGUMENT);
 }
 
@@ -1576,7 +1616,7 @@ fn emit_c_layout_contract() {
     record!(PdfOcrSpan; text, polygon, confidence, orientation, flags);
     record!(PdfOcrPageInput; page, flags, confidence, processing_ms, model, model_revision, warnings, spans);
     record!(PdfRequest; outputs, pages, markdown, detection, render, ocr, regions, tables, external_ocr, frame, flags, bold_weight_threshold);
-    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, font_weight, bold_source, fixed_pitch, dest_page, text, font, font_tag, link);
+    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, font_weight, bold_source, fixed_pitch, dest_page, fill_color, stroke_color, render_mode, text, font, font_tag, link);
     record!(PdfStructureElement; page, mcid, role);
     record!(PdfStructureNode; parent, role, alt_text, actual_text, language, references);
     record!(PdfContentReference; page, mcid);
@@ -1593,9 +1633,10 @@ fn emit_c_layout_contract() {
     record!(PdfCell; row, column, row_span, column_span, flags, bounds, text);
     record!(PdfRegion; page, kind, flags, bounds, text, ocr_reason, tokens, cells);
     record!(PdfTable; page, bounds, markdown, fallback_reason, cells);
-    record!(PdfResult; present, pdf_type, page_count, confidence, flags, pages_sampled, pages_with_text, processing_ms, title, markdown, text, pages, regions, tables, structure_nodes, cmap_gaps);
+    record!(PdfMetadata; title, author, subject, keywords, creator, producer, creation_date, mod_date);
+    record!(PdfResult; present, pdf_type, page_count, confidence, flags, pages_sampled, pages_with_text, processing_ms, metadata, markdown, text, pages, regions, tables, structure_nodes, cmap_gaps);
     record!(PdfError; status, message);
-    record!(PdfDocumentInfo; page_count, audit, pages);
+    record!(PdfDocumentInfo; page_count, audit, metadata, pages);
     record!(PdfPageNumbers; ptr, len);
     record!(PdfStrings; ptr, len);
     record!(PdfQuads; ptr, len);
@@ -1617,4 +1658,91 @@ fn emit_c_layout_contract() {
     record!(PdfStructureNodes; ptr, len);
     record!(PdfContentReferences; ptr, len);
     record!(PdfCMapGaps; ptr, len);
+}
+
+#[test]
+fn document_metadata_is_read_and_decoded() {
+    use lopdf::{dictionary, Document, Object, StringFormat};
+
+    let utf16 = |text: &str| {
+        let mut bytes = vec![0xFE, 0xFF];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        Object::String(bytes, StringFormat::Hexadecimal)
+    };
+    let mut doc = Document::with_version("1.7");
+    let keywords = doc.add_object(Object::string_literal("annual, colour"));
+    let info = doc.add_object(dictionary! {
+        "Title" => utf16("Größe – Überblick"),
+        "Author" => Object::string_literal(b"Jos\xE9 Mart\xEDnez \x84 Acme\x92".to_vec()),
+        "Subject" => Object::string_literal("Quarterly results"),
+        "Keywords" => Object::Reference(keywords),
+        "Creator" => Object::string_literal("Writer"),
+        "Producer" => utf16("PDF Library 1.0"),
+        "CreationDate" => Object::string_literal("D:20240115103000+01'00'"),
+        "ModDate" => Object::string_literal("D:20240116120000+01'00'"),
+    });
+    doc.trailer.set("Info", Object::Reference(info));
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    let page = dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+    };
+    doc.objects.insert(page_id, Object::Dictionary(page));
+    let pages = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![page_id.into()],
+        "Count" => 1,
+    };
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog = dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    };
+    let catalog_id = doc.add_object(catalog);
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+
+    let doc = Doc::bytes(&bytes, None);
+    let info = doc.info();
+    assert_eq!(unsafe { string(info.metadata.title) }, "Größe – Überblick");
+    assert_eq!(
+        unsafe { string(info.metadata.author) },
+        "José Martínez — Acme™"
+    );
+    assert_eq!(
+        unsafe { string(info.metadata.subject) },
+        "Quarterly results"
+    );
+    assert_eq!(unsafe { string(info.metadata.keywords) }, "annual, colour");
+    assert_eq!(unsafe { string(info.metadata.creator) }, "Writer");
+    assert_eq!(unsafe { string(info.metadata.producer) }, "PDF Library 1.0");
+    assert_eq!(
+        unsafe { string(info.metadata.creation_date) },
+        "D:20240115103000+01'00'"
+    );
+    assert_eq!(
+        unsafe { string(info.metadata.mod_date) },
+        "D:20240116120000+01'00'"
+    );
+
+    let r = input::default_request();
+    let result = doc.run(&r);
+    let meta = result.get().metadata;
+    assert_eq!(unsafe { string(meta.title) }, "Größe – Überblick");
+    assert_eq!(unsafe { string(meta.author) }, "José Martínez — Acme™");
+    assert_eq!(unsafe { string(meta.subject) }, "Quarterly results");
+    assert_eq!(unsafe { string(meta.keywords) }, "annual, colour");
+    assert_eq!(unsafe { string(meta.creator) }, "Writer");
+    assert_eq!(unsafe { string(meta.producer) }, "PDF Library 1.0");
+    assert_eq!(
+        unsafe { string(meta.creation_date) },
+        "D:20240115103000+01'00'"
+    );
+    assert_eq!(unsafe { string(meta.mod_date) }, "D:20240116120000+01'00'");
 }

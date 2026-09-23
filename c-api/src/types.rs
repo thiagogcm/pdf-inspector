@@ -111,6 +111,21 @@ pub const PDF_ADVANCE_KNOWN: u32 = 32;
 /// `PdfItem.flags`: legacy private-use symbol cleanup changed a character.
 /// Decoding provenance; absence does not guarantee decoding accuracy.
 pub const PDF_LEGACY_SYMBOL_REWRITE: u32 = 64;
+/// `PdfItem.flags`: `fill_color` carries the non-stroking colour as 8-bit sRGB.
+pub const PDF_HAS_FILL_COLOR: u32 = 128;
+/// `PdfItem.flags`: `stroke_color` carries the stroking colour as 8-bit sRGB.
+pub const PDF_HAS_STROKE_COLOR: u32 = 256;
+/// `PdfItem.flags`: `render_mode` carries the text render mode `Tr` (`0..=7`).
+pub const PDF_HAS_RENDER_MODE: u32 = 512;
+/// `PdfItem.render_mode` when `PDF_HAS_RENDER_MODE` is set.
+pub const PDF_RENDER_MODE_FILL: u32 = 0;
+pub const PDF_RENDER_MODE_STROKE: u32 = 1;
+pub const PDF_RENDER_MODE_FILL_STROKE: u32 = 2;
+pub const PDF_RENDER_MODE_INVISIBLE: u32 = 3;
+pub const PDF_RENDER_MODE_FILL_CLIP: u32 = 4;
+pub const PDF_RENDER_MODE_STROKE_CLIP: u32 = 5;
+pub const PDF_RENDER_MODE_FILL_STROKE_CLIP: u32 = 6;
+pub const PDF_RENDER_MODE_CLIP: u32 = 7;
 /// `PdfPage.flags` bits.
 pub const PDF_PAGE_NEEDS_OCR: u32 = 1;
 pub const PDF_PAGE_HAS_TABLES: u32 = 2;
@@ -340,7 +355,10 @@ pub struct PdfRequest {
 /// `is_bold` is unset, else `PDF_BOLD_FONT_*` / `PDF_BOLD_PAINTED`.
 /// `fixed_pitch` is `PDF_PITCH_*`. `dest_page` is a 1-indexed GoTo target;
 /// 0 means none. URI stays in `link`. Composition ignores `dest_page`: the
-/// Markdown pipeline has no destination concept.
+/// Markdown pipeline has no destination concept. `fill_color` and `stroke_color`
+/// carry the non-stroking and stroking colours as 8-bit sRGB `0x00RRGGBB` when
+/// `PDF_HAS_FILL_COLOR` and `PDF_HAS_STROKE_COLOR` are set. `render_mode` is
+/// `0..=7` (see `PDF_RENDER_MODE_*`) when `PDF_HAS_RENDER_MODE` is set.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfItem {
@@ -356,6 +374,9 @@ pub struct PdfItem {
     pub bold_source: u32,
     pub fixed_pitch: u32,
     pub dest_page: u32,
+    pub fill_color: u32,
+    pub stroke_color: u32,
+    pub render_mode: u32,
     pub text: PdfBytes,
     pub font: PdfBytes,
     pub font_tag: PdfBytes,
@@ -531,6 +552,21 @@ pub struct PdfTable {
     pub fallback_reason: PdfBytes,
     pub cells: PdfCells,
 }
+/// Decoded document information dictionary entries (the trailer's `/Info`).
+/// Missing or non-string entries have NULL/0 in their `PdfBytes`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PdfMetadata {
+    pub title: PdfBytes,
+    pub author: PdfBytes,
+    pub subject: PdfBytes,
+    pub keywords: PdfBytes,
+    pub creator: PdfBytes,
+    pub producer: PdfBytes,
+    pub creation_date: PdfBytes,
+    pub mod_date: PdfBytes,
+}
+
 /// One immutable graph of records, published by pointer and released only
 /// with pdf_inspector_result_free. Nested storage lasts as long as the
 /// result, independently of the source document. `flags` are `PDF_DOC_*`;
@@ -548,7 +584,7 @@ pub struct PdfResult {
     pub pages_sampled: u32,
     pub pages_with_text: u32,
     pub processing_ms: u64,
-    pub title: PdfBytes,
+    pub metadata: PdfMetadata,
     pub markdown: PdfBytes,
     pub text: PdfBytes,
     pub pages: PdfPages,
@@ -566,11 +602,13 @@ pub struct PdfError {
 }
 /// Facts recorded at open, borrowed from the document until
 /// pdf_inspector_document_free. `pages` are sheet-frame dimensions of every page.
+/// `metadata` carries decoded trailer `/Info` entries.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfDocumentInfo {
     pub page_count: u32,
     pub audit: PdfLoadAudit,
+    pub metadata: PdfMetadata,
     pub pages: PdfPageInfos,
 }
 
