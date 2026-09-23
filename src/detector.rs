@@ -2369,21 +2369,21 @@ fn collect_images_from_resources(
 /// The text entries of a document information dictionary, each decoded as
 /// a PDF text string (see [`PdfTypeResult::title`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct DocumentInfo {
-    pub(crate) title: Option<String>,
-    pub(crate) author: Option<String>,
-    pub(crate) subject: Option<String>,
-    pub(crate) keywords: Option<String>,
-    pub(crate) creator: Option<String>,
-    pub(crate) producer: Option<String>,
-    pub(crate) creation_date: Option<String>,
-    pub(crate) mod_date: Option<String>,
+pub struct DocumentInfo {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub subject: Option<String>,
+    pub keywords: Option<String>,
+    pub creator: Option<String>,
+    pub producer: Option<String>,
+    pub creation_date: Option<String>,
+    pub mod_date: Option<String>,
 }
 
 /// Read the document information dictionary the trailer's `/Info` names,
 /// directly or by reference. An entry that is missing, or whose value
 /// (followed through a reference) is not a string, reads as `None`.
-pub(crate) fn read_document_info(doc: &Document) -> DocumentInfo {
+pub fn read_document_info(doc: &Document) -> DocumentInfo {
     let info = match doc.trailer.get(b"Info") {
         Ok(Object::Reference(id)) => doc.get_dictionary(*id).ok(),
         Ok(Object::Dictionary(dict)) => Some(dict),
