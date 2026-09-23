@@ -53,7 +53,8 @@ mod xref_repair;
 
 pub use detector::{
     detect_pdf_type, detect_pdf_type_mem, detect_pdf_type_mem_with_config,
-    detect_pdf_type_with_config, DetectionConfig, PdfType, PdfTypeResult, ScanStrategy,
+    detect_pdf_type_with_config, read_document_info, DetectionConfig, DocumentInfo, PdfType,
+    PdfTypeResult, ScanStrategy,
 };
 pub use extractor::geometry::PageRotation;
 pub use extractor::{

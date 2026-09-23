@@ -52,7 +52,7 @@ const _: () = {
 /// run for a non-default detection configuration.
 enum Inspection<'a> {
     Cached(&'a PdfTypeResult),
-    Fresh(PdfTypeResult),
+    Fresh(Box<PdfTypeResult>),
 }
 impl std::ops::Deref for Inspection<'_> {
     type Target = PdfTypeResult;
@@ -103,6 +103,7 @@ impl DocumentState {
         let pages = doc.get_pages();
         let frames = PageFrame::all(&doc);
         let storage = Storage::default();
+        let doc_info = pdf_inspector::detector::read_document_info(&doc);
         let info = PdfDocumentInfo {
             page_count: narrow(frames.len()),
             audit: PdfLoadAudit {
@@ -111,6 +112,7 @@ impl DocumentState {
                 widened_form_bboxes: narrow(repairs.widened_form_bboxes),
                 saturated_bbox_numerals: narrow(repairs.saturated_bbox_numerals),
             },
+            metadata: storage.metadata(&doc_info),
             pages: storage.slice(frames.iter().map(|f| f.info(PositionFrame::Sheet))),
         };
         Ok(Self {
@@ -136,7 +138,7 @@ impl DocumentState {
     ) -> Fallible<Inspection<'_>> {
         if !is_default_detection(options) {
             let fresh = pdf_inspector::detect_pdf_type_mem_with_config(&self.bytes, config)?;
-            return Ok(Inspection::Fresh(fresh));
+            return Ok(Inspection::Fresh(Box::new(fresh)));
         }
         if let Some(cached) = self.default_inspection.get() {
             return Ok(Inspection::Cached(cached));
@@ -232,7 +234,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             | (u32::from(inspection.ocr_recommended) * PDF_DOC_OCR_RECOMMENDED),
         pages_sampled: inspection.pages_sampled,
         pages_with_text: inspection.pages_with_text,
-        title: storage.optional(inspection.title.as_deref()),
+        metadata: storage.metadata_from_inspection(&inspection),
         ..PdfResult::default()
     };
 
@@ -943,7 +945,10 @@ const ALL_ITEM_FLAGS: u32 = PDF_BOLD
     | PDF_STRIKEOUT
     | PDF_HAS_MCID
     | PDF_ADVANCE_KNOWN
-    | PDF_LEGACY_SYMBOL_REWRITE;
+    | PDF_LEGACY_SYMBOL_REWRITE
+    | PDF_HAS_FILL_COLOR
+    | PDF_HAS_STROKE_COLOR
+    | PDF_HAS_RENDER_MODE;
 fn markdown_result(markdown: String, page_count: u32) -> ResultOwner {
     let storage = Storage::default();
     let result = PdfResult {
@@ -1038,6 +1043,21 @@ pub(super) unsafe fn compose_items(
             font_weight: super::output::parse_font_weight(i.font_weight)?,
             bold_source: super::output::parse_bold_source(i.bold_source)?,
             fixed_pitch: super::output::parse_fixed_pitch(i.fixed_pitch)?,
+            fill_color: if i.flags & PDF_HAS_FILL_COLOR != 0 {
+                Some(super::output::parse_color(i.fill_color, "fill_color")?)
+            } else {
+                None
+            },
+            stroke_color: if i.flags & PDF_HAS_STROKE_COLOR != 0 {
+                Some(super::output::parse_color(i.stroke_color, "stroke_color")?)
+            } else {
+                None
+            },
+            render_mode: if i.flags & PDF_HAS_RENDER_MODE != 0 {
+                Some(super::output::parse_render_mode(i.render_mode)?)
+            } else {
+                None
+            },
             is_underline: i.flags & PDF_UNDERLINE != 0,
             is_strikeout: i.flags & PDF_STRIKEOUT != 0,
             item_type: kind,

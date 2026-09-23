@@ -242,6 +242,40 @@
 #define PDF_LEGACY_SYMBOL_REWRITE 64
 
 /**
+ * `PdfItem.flags`: `fill_color` carries the non-stroking colour as 8-bit sRGB.
+ */
+#define PDF_HAS_FILL_COLOR 128
+
+/**
+ * `PdfItem.flags`: `stroke_color` carries the stroking colour as 8-bit sRGB.
+ */
+#define PDF_HAS_STROKE_COLOR 256
+
+/**
+ * `PdfItem.flags`: `render_mode` carries the text render mode `Tr` (`0..=7`).
+ */
+#define PDF_HAS_RENDER_MODE 512
+
+/**
+ * `PdfItem.render_mode` when `PDF_HAS_RENDER_MODE` is set.
+ */
+#define PDF_RENDER_MODE_FILL 0
+
+#define PDF_RENDER_MODE_STROKE 1
+
+#define PDF_RENDER_MODE_FILL_STROKE 2
+
+#define PDF_RENDER_MODE_INVISIBLE 3
+
+#define PDF_RENDER_MODE_FILL_CLIP 4
+
+#define PDF_RENDER_MODE_STROKE_CLIP 5
+
+#define PDF_RENDER_MODE_FILL_STROKE_CLIP 6
+
+#define PDF_RENDER_MODE_CLIP 7
+
+/**
  * `PdfPage.flags` bits.
  */
 #define PDF_PAGE_NEEDS_OCR 1
@@ -566,6 +600,21 @@ typedef struct {
   uint32_t saturated_bbox_numerals;
 } PdfLoadAudit;
 
+/**
+ * Decoded document information dictionary entries (the trailer's `/Info`).
+ * Missing or non-string entries have NULL/0 in their `PdfBytes`.
+ */
+typedef struct {
+  PdfBytes title;
+  PdfBytes author;
+  PdfBytes subject;
+  PdfBytes keywords;
+  PdfBytes creator;
+  PdfBytes producer;
+  PdfBytes creation_date;
+  PdfBytes mod_date;
+} PdfMetadata;
+
 typedef struct {
   uint32_t page;
   float width;
@@ -581,10 +630,12 @@ typedef struct {
 /**
  * Facts recorded at open, borrowed from the document until
  * pdf_inspector_document_free. `pages` are sheet-frame dimensions of every page.
+ * `metadata` carries decoded trailer `/Info` entries.
  */
 typedef struct {
   uint32_t page_count;
   PdfLoadAudit audit;
+  PdfMetadata metadata;
   PdfPageInfos pages;
 } PdfDocumentInfo;
 
@@ -596,7 +647,10 @@ typedef struct {
  * `is_bold` is unset, else `PDF_BOLD_FONT_*` / `PDF_BOLD_PAINTED`.
  * `fixed_pitch` is `PDF_PITCH_*`. `dest_page` is a 1-indexed GoTo target;
  * 0 means none. URI stays in `link`. Composition ignores `dest_page`: the
- * Markdown pipeline has no destination concept.
+ * Markdown pipeline has no destination concept. `fill_color` and `stroke_color`
+ * carry the non-stroking and stroking colours as 8-bit sRGB `0x00RRGGBB` when
+ * `PDF_HAS_FILL_COLOR` and `PDF_HAS_STROKE_COLOR` are set. `render_mode` is
+ * `0..=7` (see `PDF_RENDER_MODE_*`) when `PDF_HAS_RENDER_MODE` is set.
  */
 typedef struct {
   uint32_t page;
@@ -611,6 +665,9 @@ typedef struct {
   uint32_t bold_source;
   uint32_t fixed_pitch;
   uint32_t dest_page;
+  uint32_t fill_color;
+  uint32_t stroke_color;
+  uint32_t render_mode;
   PdfBytes text;
   PdfBytes font;
   PdfBytes font_tag;
@@ -848,7 +905,7 @@ typedef struct {
   uint32_t pages_sampled;
   uint32_t pages_with_text;
   uint64_t processing_ms;
-  PdfBytes title;
+  PdfMetadata metadata;
   PdfBytes markdown;
   PdfBytes text;
   PdfPages pages;

@@ -71,13 +71,29 @@ impl Storage {
     /// Items arrive y-up lower-left in the request frame from core; present
     /// y-down top-left with clockwise rotation (presentation only, no math).
     pub(super) fn item(&self, item: &TextItem, frame_height: f32) -> PdfItem {
+        let has_fill = item.fill_color.is_some();
+        let fill_color = match item.fill_color {
+            Some([r, g, b]) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+            None => 0,
+        };
+        let has_stroke = item.stroke_color.is_some();
+        let stroke_color = match item.stroke_color {
+            Some([r, g, b]) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+            None => 0,
+        };
+        let has_render_mode = item.render_mode.is_some();
+        let render_mode = item.render_mode.unwrap_or(0) as u32;
+
         let flags = (u32::from(item.is_bold) * PDF_BOLD)
             | (u32::from(item.is_italic) * PDF_ITALIC)
             | (u32::from(item.is_underline) * PDF_UNDERLINE)
             | (u32::from(item.is_strikeout) * PDF_STRIKEOUT)
             | (u32::from(item.mcid.is_some()) * PDF_HAS_MCID)
             | (u32::from(item.advance_known) * PDF_ADVANCE_KNOWN)
-            | (u32::from(item.legacy_symbol_rewrite) * PDF_LEGACY_SYMBOL_REWRITE);
+            | (u32::from(item.legacy_symbol_rewrite) * PDF_LEGACY_SYMBOL_REWRITE)
+            | (u32::from(has_fill) * PDF_HAS_FILL_COLOR)
+            | (u32::from(has_stroke) * PDF_HAS_STROKE_COLOR)
+            | (u32::from(has_render_mode) * PDF_HAS_RENDER_MODE);
         let (kind, link) = match &item.item_type {
             pdf_inspector::types::ItemType::Text => (PDF_ITEM_TEXT, None),
             pdf_inspector::types::ItemType::Image => (PDF_ITEM_IMAGE, None),
@@ -100,11 +116,41 @@ impl Storage {
                 Some(true) => PDF_PITCH_FIXED,
                 Some(false) => PDF_PITCH_PROPORTIONAL,
             },
+            dest_page: 0,
+            fill_color,
+            stroke_color,
+            render_mode,
             text: self.bytes(&item.text),
             font: self.bytes(&item.font),
             font_tag: self.bytes(&item.font_tag),
-            dest_page: 0,
             link: self.optional(link),
+        }
+    }
+    pub(super) fn metadata(&self, info: &pdf_inspector::detector::DocumentInfo) -> PdfMetadata {
+        PdfMetadata {
+            title: self.optional(info.title.as_deref()),
+            author: self.optional(info.author.as_deref()),
+            subject: self.optional(info.subject.as_deref()),
+            keywords: self.optional(info.keywords.as_deref()),
+            creator: self.optional(info.creator.as_deref()),
+            producer: self.optional(info.producer.as_deref()),
+            creation_date: self.optional(info.creation_date.as_deref()),
+            mod_date: self.optional(info.mod_date.as_deref()),
+        }
+    }
+    pub(super) fn metadata_from_inspection(
+        &self,
+        inspection: &pdf_inspector::detector::PdfTypeResult,
+    ) -> PdfMetadata {
+        PdfMetadata {
+            title: self.optional(inspection.title.as_deref()),
+            author: self.optional(inspection.author.as_deref()),
+            subject: self.optional(inspection.subject.as_deref()),
+            keywords: self.optional(inspection.keywords.as_deref()),
+            creator: self.optional(inspection.creator.as_deref()),
+            producer: self.optional(inspection.producer.as_deref()),
+            creation_date: self.optional(inspection.creation_date.as_deref()),
+            mod_date: self.optional(inspection.mod_date.as_deref()),
         }
     }
 }
@@ -141,6 +187,22 @@ pub(super) fn parse_fixed_pitch(value: u32) -> Fallible<Option<bool>> {
         PDF_PITCH_PROPORTIONAL => Ok(Some(false)),
         _ => Err(Failure::invalid("unknown fixed pitch")),
     }
+}
+pub(super) fn parse_color(value: u32, name: &'static str) -> Fallible<[u8; 3]> {
+    if value > 0x00FF_FFFF {
+        return Err(Failure::invalid(format!("{name} is outside 24-bit sRGB")));
+    }
+    Ok([
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        (value & 0xFF) as u8,
+    ])
+}
+pub(super) fn parse_render_mode(value: u32) -> Fallible<u8> {
+    if value > 7 {
+        return Err(Failure::invalid("render mode is outside 0..7"));
+    }
+    Ok(value as u8)
 }
 /// y-up lower-left box to y-down top-left (presentation flip, no rotation).
 pub(super) fn flip_box(x: f32, y: f32, w: f32, h: f32, frame_height: f32) -> PdfBox {
