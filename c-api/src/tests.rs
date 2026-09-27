@@ -550,6 +550,233 @@ fn positioned_results_forward_upstream_cmap_gap_coverage() {
     assert_ne!(result.get().flags & PDF_DOC_ENCODING_ISSUES, 0);
 }
 
+/// One page showing `content` through the font `add_font` adds as `/F1`.
+fn single_font_pdf(
+    add_font: impl FnOnce(&mut lopdf::Document) -> lopdf::ObjectId,
+    content: &str,
+) -> lopdf::Document {
+    use lopdf::{dictionary, Document, Stream};
+    let mut doc = Document::with_version("1.5");
+    let pages = doc.new_object_id();
+    let font = add_font(&mut doc);
+    let stream = doc.add_object(Stream::new(dictionary! {}, content.as_bytes().to_vec()));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+        "Contents" => stream,
+    });
+    doc.objects.insert(
+        pages,
+        dictionary! { "Type" => "Pages", "Count" => 1, "Kids" => vec![page.into()] }.into(),
+    );
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    doc.trailer.set("Root", catalog);
+    doc
+}
+
+/// Items, plain text, and Markdown of the only page.
+fn page_readings(doc: lopdf::Document) -> (Owned, String, String, String) {
+    let doc = open(doc);
+    let mut r = input::default_request();
+    r.outputs = PDF_OUT_ITEMS | PDF_OUT_TEXT | PDF_OUT_MARKDOWN;
+    let result = doc.run(&r);
+    let page = &result.pages()[0];
+    let (items, text, markdown) = unsafe {
+        let items = input::slice(page.items.ptr, page.items.len).unwrap();
+        (
+            items.iter().map(|i| string(i.text)).collect::<String>(),
+            string(page.text),
+            string(page.markdown),
+        )
+    };
+    (result, items, text, markdown)
+}
+
+/// The codes of "Income Statement" under `wide_codespace_cmap`.
+const WIDE_CODESPACE_ENTRIES: [(u8, char); 10] = [
+    (0x01, 'I'),
+    (0x04, ' '),
+    (0x08, 'o'),
+    (0x0A, 'n'),
+    (0x0F, 't'),
+    (0x12, 'e'),
+    (0x13, 'm'),
+    (0x14, 'a'),
+    (0x82, 'c'),
+    (0x8E, 'S'),
+];
+
+/// A ToUnicode CMap declaring a two-byte codespace over one-byte entries,
+/// one entry spelled in four hex digits.
+fn wide_codespace_cmap() -> Vec<u8> {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Adobe-Identity-UCS def /CMapType 2 def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n11 beginbfchar\n",
+    );
+    for (code, ch) in WIDE_CODESPACE_ENTRIES {
+        cmap.push_str(&format!("<{code:02X}> <{:04X}>\n", ch as u32));
+    }
+    cmap.push_str("<0020> <0020>\nendbfchar endcmap\n");
+    cmap.push_str("CMapName currentdict /CMap defineresource pop end end\n");
+    cmap.into_bytes()
+}
+
+/// "Income Statement" as one kerned TJ of one-, two- and three-byte strings.
+const WIDE_CODESPACE_TEXT: &str =
+    "BT /F1 12 Tf 72 700 Td [(\\001) (\\012\\202) (\\010\\023\\022) (\\004\\216) \
+     (\\017) (\\024) (\\017) (\\022) (\\023\\022) (\\012) (\\017)] TJ ET";
+
+#[test]
+fn simple_font_reads_one_byte_per_code_under_a_two_byte_codespace() {
+    use lopdf::{dictionary, Object, Stream};
+    // The Differences name the codes by glyph index, which says nothing
+    // without the program: the CMap is the only reading of these codes.
+    let differences: Vec<Object> = (1..)
+        .zip(WIDE_CODESPACE_ENTRIES)
+        .flat_map(|(index, (code, _))| {
+            [
+                i64::from(code).into(),
+                Object::Name(format!("gid{index:05}").into_bytes()),
+            ]
+        })
+        .collect();
+    let simple = single_font_pdf(
+        |doc| {
+            let cmap = doc.add_object(Stream::new(dictionary! {}, wide_codespace_cmap()));
+            doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+                "Encoding" => dictionary! {
+                    "Type" => "Encoding", "BaseEncoding" => "WinAnsiEncoding",
+                    "Differences" => differences,
+                },
+                "ToUnicode" => cmap,
+            })
+        },
+        WIDE_CODESPACE_TEXT,
+    );
+    let (result, items, text, markdown) = page_readings(simple);
+    assert_eq!(items, "Income Statement");
+    assert_eq!(text.trim(), "Income Statement");
+    assert!(markdown.contains("Income Statement"), "{markdown}");
+    assert_eq!(result.get().cmap_gaps.len, 0);
+    assert_eq!(result.get().flags & PDF_DOC_ENCODING_ISSUES, 0);
+
+    // A composite font keeps its CMap's two-byte codes.
+    let composite = single_font_pdf(
+        |doc| {
+            let cmap = doc.add_object(Stream::new(dictionary! {}, wide_codespace_cmap()));
+            let cid_font = doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "CIDFontType0", "BaseFont" => "WideFace",
+                "CIDSystemInfo" => dictionary! {
+                    "Registry" => "Adobe", "Ordering" => "Identity", "Supplement" => 0,
+                },
+                "DW" => 600,
+            });
+            doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "WideFace",
+                "Encoding" => "Identity-H", "DescendantFonts" => vec![cid_font.into()],
+                "ToUnicode" => cmap,
+            })
+        },
+        WIDE_CODESPACE_TEXT,
+    );
+    let (_, items, _, _) = page_readings(composite);
+    assert_ne!(items, "Income Statement");
+}
+
+/// An embedded Type 1 program whose encoding array lays out its glyphs the
+/// way TeX's text faces do: ligatures below the space, curly quotes where
+/// ASCII has straight ones, an en dash at the left brace.
+fn tex_type1_font(doc: &mut lopdf::Document, encoding: Option<lopdf::Object>) -> lopdf::ObjectId {
+    use lopdf::{dictionary, Stream};
+    let mut array = String::from("/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\n");
+    for (code, name) in [
+        (11, "ff"),
+        (12, "fi"),
+        (34, "quotedblright"),
+        (49, "one"),
+        (50, "two"),
+        (92, "quotedblleft"),
+        (123, "endash"),
+    ] {
+        array.push_str(&format!("dup {code} /{name} put\n"));
+    }
+    for letter in b'a'..=b'z' {
+        array.push_str(&format!("dup {letter} /{} put\n", letter as char));
+    }
+    let mut program = format!(
+        "%!PS-AdobeFont-1.0: TeXFace 1.0\n11 dict begin\n/FontName /TeXFace def\n\
+         /PaintType 0 def\n/FontType 1 def\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n\
+         {array}readonly def\n/FontBBox {{-40 -250 1009 750}} readonly def\ncurrentdict end\n\
+         currentfile eexec\n"
+    )
+    .into_bytes();
+    let length1 = program.len();
+    program.extend_from_slice(&[0xd9, 0xd6, 0x6f, 0x63, 0x3b, 0x84, 0x6a, 0x98]);
+    let length2 = program.len() - length1;
+    let font_file = doc.add_object(Stream::new(
+        dictionary! { "Length1" => length1 as i64, "Length2" => length2 as i64, "Length3" => 0 },
+        program,
+    ));
+    let descriptor = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor", "FontName" => "ABCDEF+TeXFace", "Flags" => 4,
+        "FontBBox" => vec![(-40).into(), (-250).into(), 1009.into(), 750.into()],
+        "ItalicAngle" => 0, "Ascent" => 694, "Descent" => -194, "CapHeight" => 683,
+        "StemV" => 65, "FontFile" => font_file,
+    });
+    let mut font = dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "ABCDEF+TeXFace",
+        "FontDescriptor" => descriptor,
+    };
+    if let Some(encoding) = encoding {
+        font.set("Encoding", encoding);
+    }
+    doc.add_object(font)
+}
+
+/// Each string on a line of its own.
+fn lines_of(strings: &[&str]) -> String {
+    strings
+        .iter()
+        .enumerate()
+        .map(|(line, s)| format!("BT /F1 12 Tf 72 {} Td ({s}) Tj ET\n", 700 - 40 * line))
+        .collect()
+}
+
+#[test]
+fn type1_font_without_encoding_reads_through_its_programs_encoding() {
+    use lopdf::{dictionary, Object};
+    let content = lines_of(&["\\014nd", "e\\013ect", "\\134quoted\\042", "1\\1732"]);
+    let (result, items, text, markdown) =
+        page_readings(single_font_pdf(|doc| tex_type1_font(doc, None), &content));
+    let expected = ["find", "effect", "\u{201C}quoted\u{201D}", "1\u{2013}2"];
+    assert_eq!(items, expected.concat());
+    let lines: Vec<_> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(lines, expected);
+    for word in expected {
+        assert!(markdown.contains(word), "{word} in {markdown}");
+    }
+    assert_eq!(result.get().flags & PDF_DOC_ENCODING_ISSUES, 0);
+
+    // The font's own /Differences still come first; the program is their base.
+    let encoding = dictionary! {
+        "Type" => "Encoding",
+        "Differences" => vec![12.into(), Object::Name(b"A".to_vec())],
+    };
+    let content = lines_of(&["\\014nd", "e\\013ect"]);
+    let (_, items, _, _) = page_readings(single_font_pdf(
+        |doc| tex_type1_font(doc, Some(encoding.into())),
+        &content,
+    ));
+    assert_eq!(items, "Andeffect");
+}
+
 #[test]
 fn legacy_symbol_rewrite_is_item_flag_and_survives_composition() {
     let doc = open(symbol_rewrite_pdf());
