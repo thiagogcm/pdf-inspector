@@ -125,13 +125,13 @@ pub(crate) fn merge_chart_regions(
     merged
 }
 
-pub(crate) type PageChartRegions = HashMap<u32, Vec<(f32, f32, f32, f32)>>;
+pub type PageChartRegions = HashMap<u32, Vec<(f32, f32, f32, f32)>>;
 
 /// Compute the chart masks used by both layout analysis and Markdown output.
 ///
 /// Keeping the rect-backed and dense-line heuristics behind one entry point
 /// ensures metadata and extraction cannot drift when either detector changes.
-pub(crate) fn chart_regions_by_page(
+pub fn chart_regions_by_page(
     items: &[TextItem],
     rects: &[PdfRect],
     lines: &[PdfLine],
