@@ -900,39 +900,6 @@ pub fn extract_positioned_text_impl(
     ))
 }
 
-/// The pages among `page_filter` (every page when `None`) that show a
-/// non-empty string in render mode 3, whitespace included, which an
-/// extraction without `include_invisible` skips: each page's
-/// `skipped_invisible`, which [`extract_positioned_text_impl`] does not
-/// return. Each page is parsed again, sharing one font style cache like the
-/// document extraction.
-pub fn pages_skipping_invisible_text(
-    doc: &Document,
-    font_cmaps: &FontCMaps,
-    page_filter: Option<&HashSet<u32>>,
-) -> Result<HashSet<u32>, PdfError> {
-    let mut style_cache = FontStyleCache::new();
-    let mut skipping = HashSet::new();
-    for (page_num, &page_id) in doc.get_pages().iter() {
-        if page_filter.is_some_and(|filter| !filter.contains(page_num)) {
-            continue;
-        }
-        let (_, _, _, skipped_invisible, _) = extract_page_text_items_with_options(
-            doc,
-            page_id,
-            *page_num,
-            font_cmaps,
-            TextExtractionOptions::default(),
-            &mut style_cache,
-            &mut FormWalkBudget::new(),
-        )?;
-        if skipped_invisible {
-            skipping.insert(*page_num);
-        }
-    }
-    Ok(skipping)
-}
-
 fn suppress_table_underlines(
     items: &mut [TextItem],
     rects: &[PdfRect],
