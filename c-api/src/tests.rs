@@ -1868,6 +1868,81 @@ fn chart_boxes_include_dense_line_charts_in_either_frame() {
 }
 
 #[test]
+fn analysis_flags_pages_that_skip_invisible_text() {
+    use lopdf::{dictionary, Document, Stream};
+    // Each page shows visible text, and then: a hidden word; nothing more; a
+    // hidden space; a hidden empty string; a form showing a hidden word.
+    let hidden = [
+        "3 Tr (Hidden layer) Tj",
+        "",
+        "3 Tr ( ) Tj",
+        "3 Tr () Tj",
+        "/Fm1 Do",
+    ];
+    let mut source = Document::with_version("1.5");
+    let pages = source.new_object_id();
+    let font = source.add_object(
+        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
+    let form = source.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+        },
+        b"BT /F1 12 Tf 3 Tr 72 600 Td (Hidden form) Tj ET".to_vec(),
+    ));
+    let kids: Vec<lopdf::Object> = hidden
+        .iter()
+        .map(|hidden| {
+            let content =
+                format!("BT /F1 12 Tf 72 700 Td (Shown) Tj ET BT /F1 12 Tf 72 650 Td {hidden} ET");
+            let stream = source.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+            source
+                .add_object(dictionary! {
+                    "Type" => "Page", "Parent" => pages,
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    "Resources" => dictionary! {
+                        "Font" => dictionary! { "F1" => font },
+                        "XObject" => dictionary! { "Fm1" => form },
+                    },
+                    "Contents" => stream,
+                })
+                .into()
+        })
+        .collect();
+    let count = kids.len() as i64;
+    source.objects.insert(
+        pages,
+        dictionary! { "Type" => "Pages", "Count" => count, "Kids" => kids }.into(),
+    );
+    let catalog = source.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    source.trailer.set("Root", catalog);
+    let doc = open(source);
+    let flagged = |outputs: u32, flags: u32| {
+        let mut r = input::default_request();
+        r.outputs = outputs;
+        r.flags = flags;
+        doc.run(&r)
+            .pages()
+            .iter()
+            .map(|p| p.flags & PDF_PAGE_SKIPPED_INVISIBLE != 0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        flagged(PDF_OUT_ANALYSIS, 0),
+        [true, false, true, false, true]
+    );
+    // Analysis that keeps invisible text skips none of it.
+    assert_eq!(
+        flagged(PDF_OUT_ANALYSIS, PDF_REQUEST_INCLUDE_INVISIBLE),
+        [false; 5]
+    );
+    // Without a requested analysis the flag is unassessed.
+    assert_eq!(flagged(PDF_OUT_ITEMS | PDF_OUT_GEOMETRY, 0), [false; 5]);
+}
+
+#[test]
 fn invisible_text_is_opt_in() {
     let mut source = lopdf::Document::load("../tests/fixtures/cropbox_offset_origin.pdf").unwrap();
     source

@@ -32,6 +32,7 @@ The adapter runs the core's public API, exactly as the Node and Python bindings 
 | --- | --- | --- |
 | `markdown`/`tables` complete-table helpers gated on `vision` instead of `ocr` | upstream bug fix | Upstream's `vision`-only build does not compile; the C crate builds the core with `vision` |
 | `extract_pages_markdown_mem_with_options` | additive wrapper | Per-page Markdown with a password and the request's Markdown options; upstream only offers the defaults |
+| `extractor::pages_skipping_invisible_text` | additive wrapper | The pages whose extraction skipped invisible text (`PDF_PAGE_SKIPPED_INVISIBLE`), which `extract_positioned_text_impl` computes per page but does not return |
 | `load_document_from_mem_with_password`, `load_document_from_mem_with_repairs`, `LoadRepairs`, `pdf_header_offset` | visibility | Open validates, decrypts, and audits with the core loader |
 | `extractor::{visible_page_box, PageBox}`, `extractor::display_frame::{page_rotate, PageRotate, document_items_to_display_frame}`, `PageRotation::unrotate_box` | visibility | Page frames and the display-frame conversion of runs and path geometry |
 | `extractor::{extract_positioned_text_impl, TextExtractionOptions, CoordinateFrame}` | visibility | One positioned parse yielding runs, rectangles, lines, rotations, gid pages, and CMap coverage, with invisible text opt-in |
@@ -42,7 +43,7 @@ The adapter runs the core's public API, exactly as the Node and Python bindings 
 | `detector::{DocumentInfo, read_document_info}` | visibility | Read trailer document information metadata directly from Document at open |
 | `vision::cached_ocr_engine` | visibility | Runtime preparation warms the same process-cached OCR sessions |
 
-Every visibility change is a `pub(crate)` (or private) item made `pub`; no core signature, field, or behavior differs from upstream. The bug fix and the wrapper are candidates for upstream pull requests.
+Every visibility change is a `pub(crate)` (or private) item made `pub`; no core signature, field, or behavior differs from upstream. The bug fix and the wrappers are candidates for upstream pull requests.
 
 Run core checks from the repository root and binding checks explicitly:
 
@@ -117,7 +118,7 @@ Initialize requests with `pdf_inspector_request_init`. NULL requests have the sa
 | `PDF_OUT_STRUCTURE` | Tagged structure references joined to items through `(page, mcid)` |
 | `PDF_OUT_GEOMETRY` | Native path rectangles, line segments, column intervals, and chart boxes (the regions the core masks from Markdown: rect-backed charts, and dense line-grid charts spanning a prose gutter) |
 | `PDF_OUT_RENDER` | Page pixels, dimensions, stride, format, and coordinate transforms |
-| `PDF_OUT_ANALYSIS` | Native layout assessment, OCR reasons, and per-page encoding-issue flags, without text or Markdown output |
+| `PDF_OUT_ANALYSIS` | Native layout assessment, OCR reasons, and per-page encoding-issue and skipped-invisible-text flags, without text or Markdown output |
 
 Inspection accompanies every execution. Native text/items preserve the PDF's extraction evidence. Page provenance describes final Markdown. Page flags distinguish native OCR recommendations, actual recognition, native recovery (`PDF_PAGE_NATIVE_RECOVERED`: recommended for OCR but not routed), tables, columns, gid-encoded fonts, and hosted-processing recommendations. `reading_order` is `PDF_READING_SINGLE`, `PDF_READING_TABULAR`, or `PDF_READING_NEWSPAPER`. `text_orientation` is `PDF_ORIENTATION_UNKNOWN` until positioned content is parsed (items, text, or geometry), then `PDF_ORIENTATION_UPRIGHT`, or `PDF_ORIENTATION_CCW` / `PDF_ORIENTATION_CW` for pages whose text operators predominantly read bottom-to-top / top-to-bottom. `PDF_DOC_OCR_RECOMMENDED` is the detector's document-level OCR advice and is not the same as per-page `PDF_PAGE_NEEDS_OCR`. Table flags incorporate tables found in final OCR Markdown as well as native layout evidence.
 
@@ -125,7 +126,7 @@ When positioned content is parsed, `result.cmap_gaps` reports each font whose up
 
 Text drawn with render mode 3 (invisible) is skipped unless `PDF_REQUEST_INCLUDE_INVISIBLE` is set; positioned outputs, plain text, and region queries then include it.
 
-`PDF_OUT_ANALYSIS` is also marked present when Markdown or OCR processing requires it. When absent, unset layout/quality flags mean unassessed, not a clean bill of health. `PDF_PAGE_ENCODING_ISSUES` identifies pages whose OCR reasons report suspected garbled text; `PDF_DOC_ENCODING_ISSUES` aggregates selected pages. Analysis-only requests publish neither Markdown nor text.
+`PDF_OUT_ANALYSIS` is also marked present when Markdown or OCR processing requires it. When absent, unset layout/quality flags mean unassessed, not a clean bill of health. `PDF_PAGE_ENCODING_ISSUES` identifies pages whose OCR reasons report suspected garbled text; `PDF_DOC_ENCODING_ISSUES` aggregates selected pages. `PDF_PAGE_SKIPPED_INVISIBLE` marks pages that show a non-empty string in render mode 3, whitespace included, in their own content or a form they invoke, which the request's extraction skipped. It is assessed only when `PDF_OUT_ANALYSIS` is requested, by a second parse of the selected pages, and never under `PDF_REQUEST_INCLUDE_INVISIBLE`. Analysis-only requests publish neither Markdown nor text.
 
 The document Markdown is the selected pages' Markdown in order, separated by blank lines, with `<!-- Page N -->` markers when `PDF_MD_PAGE_NUMBERS` is set. Native OCR returns the core pipeline's document Markdown instead.
 

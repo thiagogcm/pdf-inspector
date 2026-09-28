@@ -8,6 +8,7 @@ use lopdf::Document;
 use lopdf::ObjectId;
 use pdf_inspector::detector::PdfTypeResult;
 use pdf_inspector::structure_tree::StructTree;
+use pdf_inspector::tounicode::FontCMaps;
 use pdf_inspector::vision::{
     FusedPageMarkdown, ImagePoint, ImageQuad, ModelIdentity, OcrPage, OcrRun, OcrSpan,
     PageContentSource, PageTransform, RenderPixelFormat, RenderedPage, RoutedOcrPage,
@@ -15,6 +16,7 @@ use pdf_inspector::vision::{
 use pdf_inspector::{
     DetectionConfig, PageMarkdown, PageRotation, PositionFrame, PositionOptions, ScanStrategy,
 };
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -311,11 +313,14 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     // frame governs geometry, not line breaks, before geometry moves to the
     // display frame when requested.
     let doc = &state.doc;
+    let set = selected.iter().copied().collect::<HashSet<_>>();
+    // Built at most once, for whichever of the parses below runs.
+    let font_cmaps = OnceCell::new();
+    let font_cmaps = || font_cmaps.get_or_init(|| FontCMaps::from_doc(doc));
     let mut content: Option<PageContent> = None;
     let mut sheet_text: BTreeMap<u32, String> = BTreeMap::new();
     if want_content {
-        let set = selected.iter().copied().collect::<HashSet<_>>();
-        let mut parsed = super::content::parse(doc, &set, extraction)?;
+        let mut parsed = super::content::parse(doc, font_cmaps(), &set, extraction)?;
         if r.outputs & PDF_OUT_TEXT != 0 {
             for number in &selected {
                 sheet_text.insert(*number, plain_text(&parsed.items, *number));
@@ -335,6 +340,13 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         }
         content = Some(parsed);
     }
+    // The positioned parse does not say which pages it skipped invisible
+    // text on, so a requested analysis parses the pages again to find out.
+    let skipping_invisible = if r.outputs & PDF_OUT_ANALYSIS != 0 && !extraction.include_invisible {
+        pdf_inspector::extractor::pages_skipping_invisible_text(doc, font_cmaps(), Some(&set))?
+    } else {
+        HashSet::new()
+    };
     // Marked-content roles of the selected pages, sorted by (page, mcid).
     let elements: Vec<PdfStructureElement> = match (r.outputs & PDF_OUT_STRUCTURE != 0)
         .then(|| state.structure())
@@ -443,6 +455,9 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         {
             view.flags |= PDF_DOC_ENCODING_ISSUES;
             p.flags |= PDF_PAGE_ENCODING_ISSUES;
+        }
+        if skipping_invisible.contains(number) {
+            p.flags |= PDF_PAGE_SKIPPED_INVISIBLE;
         }
         let final_page = final_pages.get(number);
         if let Some(f) = final_page {
