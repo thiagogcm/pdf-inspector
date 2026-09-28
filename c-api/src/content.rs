@@ -42,14 +42,14 @@ pub(super) struct PageContent {
 
 pub(super) fn parse(
     doc: &Document,
+    font_cmaps: &FontCMaps,
     pages: &HashSet<u32>,
     options: TextExtractionOptions,
 ) -> Fallible<PageContent> {
-    let font_cmaps = FontCMaps::from_doc(doc);
     let ((items, rects, lines), _thresholds, gid_pages, rotations, coverage) =
         extract_positioned_text_impl(
             doc,
-            &font_cmaps,
+            font_cmaps,
             Some(pages),
             options,
             None,
