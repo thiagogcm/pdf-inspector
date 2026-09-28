@@ -1649,6 +1649,39 @@ fn external_ocr_needs_no_bitmap_or_native_backend() {
 }
 
 #[test]
+fn grid_queries_are_sheet_frame_only() {
+    let doc = Doc::open("forecast_table_chart");
+    let page = doc.info().pages.ptr;
+    let (width, height) = unsafe { ((*page).width, (*page).height) };
+    let region = PdfRegionInput {
+        page: 1,
+        kind: PDF_REGION_GRID,
+        bounds: PdfBox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: width,
+            y1: height,
+        },
+    };
+    let mut r = input::default_request();
+    r.regions = PdfRegionInputs {
+        ptr: &region,
+        len: 1,
+    };
+    let sheet = doc.run(&r);
+    let grid = unsafe { input::slice(sheet.get().regions.ptr, 1).unwrap() };
+    assert_ne!(grid[0].flags & PDF_REGION_GRID_FOUND, 0);
+    // Even on an unrotated page, where both frames coincide: the answer's
+    // cells feed table queries, which only read the sheet frame.
+    r.frame = PDF_FRAME_DISPLAY;
+    unsafe {
+        let e = expect_failure(doc.0, &r, PDF_INVALID_ARGUMENT);
+        assert!(string((*e).message).contains("sheet frame"));
+        pdf_inspector_error_free(e);
+    }
+}
+
+#[test]
 fn region_batch_order_and_tsr_validation() {
     let doc = Doc::open("bare_name_struct");
     let mut r = input::default_request();

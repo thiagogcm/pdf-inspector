@@ -145,7 +145,7 @@ PdfResult (published pointer)
 
 ## Regions, tables, and composition
 
-`request.regions` batches text, table, and vector-grid queries. Each descriptor supplies its own page and rectangle; this batch is independent of the output page selection and preserves descriptor order. Text and table queries are executed as one core call per kind. A text/table result includes text and OCR-routing information. A grid result has `PDF_REGION_GRID_FOUND` only when a reliable grid was detected, with structure tokens and cell boxes. No grid is a successful empty result.
+`request.regions` batches text, table, and vector-grid queries. Each descriptor supplies its own page and rectangle; this batch is independent of the output page selection and preserves descriptor order. Text and table queries are executed as one core call per kind. A text/table result includes text and OCR-routing information. A grid result has `PDF_REGION_GRID_FOUND` only when a reliable grid was detected, with structure tokens and cell boxes. No grid is a successful empty result. Grid queries read and answer the sheet frame, so a found grid can feed `request.tables` unchanged; a `PDF_FRAME_DISPLAY` request containing one is rejected.
 
 `request.tables` accepts TSR structure-token arrays and cell quadrilaterals. Tokens use the upstream TSR vocabulary, including `<td></td>` or split `<td`, attribute, `>` tokens. Before the core's lenient parser sees them, the adapter requires one cell quadrilateral per cell tag, integer `rowspan`/`colspan` values, `colspan` within the core's 25-column limit, and `rowspan` within the declared row count. `PDF_TSR_STRICT` returns resolved cells and their Markdown. `PDF_TSR_AUTO` applies upstream quality repair and heuristic fallback, reporting its reason. When a fallback or repair changes the cells, the cell array is empty rather than describing a different table from the returned Markdown. All table queries are resolved with at most two core calls.
 
@@ -161,7 +161,7 @@ This exposes the structure the core parser recovered. It does not invent tags fo
 
 ## Coordinates
 
-`PdfRequest.frame` selects the coordinate frame for page dimensions, positioned runs, path geometry, and region rects. `PDF_FRAME_SHEET` (default) uses PDF points relative to the unrotated visible page box, with a top-left origin and Y increasing downward. The visible box is the intersection of CropBox and MediaBox, using upstream fallbacks for missing or invalid boxes. Width and height describe that unrotated box; `PdfPageInfo.rotation` reports the inherited PDF `/Rotate` value separately.
+`PdfRequest.frame` selects the coordinate frame for page dimensions, positioned runs, path geometry, and text and table region rects. `PDF_FRAME_SHEET` (default) uses PDF points relative to the unrotated visible page box, with a top-left origin and Y increasing downward. The visible box is the intersection of CropBox and MediaBox, using upstream fallbacks for missing or invalid boxes. Width and height describe that unrotated box; `PdfPageInfo.rotation` reports the inherited PDF `/Rotate` value separately.
 
 `PDF_FRAME_DISPLAY` reports the same geometry on the rendered page instead: the visible box turned clockwise by the inheritable `/Rotate`, top-left origin, Y down, with dimensions swapped by a quarter turn. Items sit where a renderer draws them, `rotation` reads `0` for text that renders horizontally (sheet rotation plus `/Rotate`), and region rects can be taken straight from a page image. Unknown frame values are rejected.
 
@@ -169,9 +169,9 @@ This exposes the structure the core parser recovered. It does not invent tags fo
 
 Each item reports `font_weight` (`0` when unknown, otherwise 100..=900), `bold_source` (`0` when not bold, otherwise `PDF_BOLD_FONT_NAME`, `PDF_BOLD_FONT_FLAGS`, `PDF_BOLD_WEIGHT_CLASS`, or `PDF_BOLD_PAINTED`), and `fixed_pitch` (`PDF_PITCH_UNKNOWN`, `PDF_PITCH_FIXED`, or `PDF_PITCH_PROPORTIONAL`). These are extraction evidence, not Markdown styling. URI links fill `link`; Dest/GoTo targets fill `dest_page` (1-indexed, `0` if none) on extra `PDF_ITEM_LINK` items that are not part of Markdown.
 
-Text, region, rectangle, line, column, chart, and image-region geometry all follow the request frame. Column intervals are x-only. Plain-text content is frame-independent and grouped in sheet order, so the frame never changes line breaks. Text rotation is clockwise in `[0,360)`; positive `baseline_shift` means raised text, independently of the direction of the Y axis. `PDF_ADVANCE_KNOWN` distinguishes measured text advances from estimates. `PDF_LEGACY_SYMBOL_REWRITE` marks runs whose decoded text includes a character changed by legacy symbol cleanup; it is decoding provenance, not an OCR verdict, and its absence is not a guarantee of decoding accuracy.
+Item, text and table region, rectangle, line, column, and chart geometry all follow the request frame. Column intervals are x-only. Plain-text content is frame-independent and grouped in sheet order, so the frame never changes line breaks. Text rotation is clockwise in `[0,360)`; positive `baseline_shift` means raised text, independently of the direction of the Y axis. `PDF_ADVANCE_KNOWN` distinguishes measured text advances from estimates. `PDF_LEGACY_SYMBOL_REWRITE` marks runs whose decoded text includes a character changed by legacy symbol cleanup; it is decoding provenance, not an OCR verdict, and its absence is not a guarantee of decoding accuracy.
 
-Table structure inputs, external OCR spans, and rendered-image transforms remain in the sheet frame.
+Grid region queries and their cells, table structure inputs, external OCR spans, and rendered-image transforms remain in the sheet frame.
 
 Images use top-left pixel coordinates. Each image exposes affine maps in both directions, including PDF rotation and page-box offsets:
 

@@ -329,7 +329,9 @@ pub struct PdfOcrPageInput {
 /// Initialize with pdf_inspector_request_init. Empty page selection means all
 /// pages. Page lists are sets; query batches preserve input order. `frame`
 /// selects the coordinate frame for page dimensions, positioned runs,
-/// path geometry, and region rects (see `PDF_FRAME_*`). `flags` are
+/// path geometry, and text and table region rects (see `PDF_FRAME_*`);
+/// grid region queries are sheet-frame only and rejected under
+/// `PDF_FRAME_DISPLAY`. `flags` are
 /// `PDF_REQUEST_*`; `bold_weight_threshold` is the 100..=900 class that
 /// `PDF_REQUEST_BOLD_FROM_WEIGHT` treats as bold (600 by default).
 #[repr(C)]
