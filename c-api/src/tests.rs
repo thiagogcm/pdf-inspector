@@ -1506,6 +1506,77 @@ fn display_frame_moves_path_geometry_with_items() {
     }
 }
 
+/// The stacked-bar chart of the core's rect detector tests on a Letter page:
+/// a stroked frame at [126, 548]-[522, 764] around three columns of filled
+/// segments of equal width and data-driven heights, holding numeric labels.
+const STACKED_BAR_CHART: &str = "126 548 396 216 re S \
+    208 618 46 59 re f 208 661 46 39 re f 208 696 46 37 re f \
+    313 618 46 67 re f 313 670 46 49 re f 313 691 46 42 re f \
+    419 618 46 73 re f 419 684 46 37 re f 419 708 46 25 re f \
+    BT /F1 9 Tf 228 638 Td (38) Tj 0 38 Td (30) Tj 105 -33 Td (46) Tj \
+    0 36 Td (17) Tj 105 -29 Td (57) Tj 0 44 Td (20) Tj ET";
+
+#[test]
+fn chart_boxes_enclose_the_bars_in_either_frame() {
+    use lopdf::{dictionary, Object};
+    for rotation in [0, 90, 180, 270] {
+        let mut source = single_font_pdf(
+            |doc| {
+                doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" })
+            },
+            STACKED_BAR_CHART,
+        );
+        let page = source.get_pages()[&1];
+        source
+            .get_object_mut(page)
+            .and_then(Object::as_dict_mut)
+            .unwrap()
+            .set("Rotate", rotation);
+        let doc = open(source);
+        let mut r = input::default_request();
+        r.outputs = PDF_OUT_GEOMETRY;
+        for frame in [PDF_FRAME_SHEET, PDF_FRAME_DISPLAY] {
+            r.frame = frame;
+            let result = doc.run(&r);
+            let p = &result.pages()[0];
+            let charts = unsafe { input::slice(p.charts.ptr, p.charts.len).unwrap() };
+            let rects = unsafe { input::slice(p.rectangles.ptr, p.rectangles.len).unwrap() };
+            assert_eq!(charts.len(), 1, "rotation {rotation}, frame {frame}");
+            // The chart spans its frame, the rectangle enclosing every bar.
+            let outline = rects
+                .iter()
+                .map(|r| r.bounds)
+                .max_by(|a, b| {
+                    ((a.x1 - a.x0) * (a.y1 - a.y0)).total_cmp(&((b.x1 - b.x0) * (b.y1 - b.y0)))
+                })
+                .unwrap();
+            let chart = charts[0];
+            for (got, want) in [
+                (chart.x0, outline.x0),
+                (chart.y0, outline.y0),
+                (chart.x1, outline.x1),
+                (chart.y1, outline.y1),
+            ] {
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "rotation {rotation}, frame {frame}: {chart:?} vs {outline:?}"
+                );
+            }
+            if frame == PDF_FRAME_SHEET {
+                // Top-left origin on the 792 pt sheet: y runs 792-764..792-548.
+                for (got, want) in [
+                    (chart.x0, 126.0),
+                    (chart.y0, 28.0),
+                    (chart.x1, 522.0),
+                    (chart.y1, 244.0),
+                ] {
+                    assert!((got - want).abs() < 0.01, "rotation {rotation}: {chart:?}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn invisible_text_is_opt_in() {
     let mut source = lopdf::Document::load("../tests/fixtures/cropbox_offset_origin.pdf").unwrap();

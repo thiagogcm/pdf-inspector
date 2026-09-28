@@ -206,13 +206,16 @@ pub(super) fn parse_render_mode(value: u32) -> Fallible<u8> {
 }
 /// y-up lower-left box to y-down top-left (presentation flip, no rotation).
 pub(super) fn flip_box(x: f32, y: f32, w: f32, h: f32, frame_height: f32) -> PdfBox {
-    let (x0, x1) = (x.min(x + w), x.max(x + w));
-    let (y0, y1) = (y.min(y + h), y.max(y + h));
+    flip_corners(x, y, x + w, y + h, frame_height)
+}
+/// y-up opposite corners, in either order, to y-down top-left. Core chart
+/// regions arrive as corners, not origin and extent.
+pub(super) fn flip_corners(x0: f32, y0: f32, x1: f32, y1: f32, frame_height: f32) -> PdfBox {
     PdfBox {
-        x0,
-        y0: frame_height - y1,
-        x1,
-        y1: frame_height - y0,
+        x0: x0.min(x1),
+        y0: frame_height - y0.max(y1),
+        x1: x0.max(x1),
+        y1: frame_height - y0.min(y1),
     }
 }
 /// y-up point to y-down top-left.
