@@ -201,6 +201,13 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         if region.kind > PDF_REGION_GRID {
             return Err(Failure::invalid("unknown region kind"));
         }
+        // The core's grid detector reads and answers sheet-frame rects, and
+        // its cells feed table queries, which are sheet-frame too.
+        if region.kind == PDF_REGION_GRID && frame == PositionFrame::Display {
+            return Err(Failure::invalid(
+                "grid region queries are answered in the sheet frame",
+            ));
+        }
     }
     let tables = slice(r.tables.ptr, r.tables.len)?;
     let table_inputs = tables
