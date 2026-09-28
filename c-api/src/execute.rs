@@ -1,7 +1,7 @@
 use super::content::PageContent;
 use super::frames::PageFrame;
 use super::input::*;
-use super::output::{flip_box, flip_point, narrow, orientation};
+use super::output::{flip_box, flip_corners, flip_point, narrow, orientation};
 use super::*;
 use lopdf::Document;
 
@@ -526,7 +526,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             p.charts = storage.slice(
                 pdf_inspector::tables::detect_chart_regions(&page_items, &content.rects, *number)
                     .into_iter()
-                    .map(|(x, y, w, h)| flip_box(x, y, w, h, frame_height)),
+                    .map(|(x0, y0, x1, y1)| flip_corners(x0, y0, x1, y1, frame_height)),
             );
             // The core records only turned pages; absence means upright.
             let turned = content.rotations.get(number).copied();
