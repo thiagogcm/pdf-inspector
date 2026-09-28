@@ -29,22 +29,22 @@ const MAX_FORM_XOBJECT_DEPTH: u8 = 5;
 /// Upper bound on Form XObject invocations during a single page extraction.
 /// Depth alone is not enough: an acyclic DAG where each form invokes the next
 /// N times expands to N^depth work before the depth cap is reached.
-const MAX_FORM_XOBJECT_INVOCATIONS: usize = 10_000;
+pub const MAX_FORM_XOBJECT_INVOCATIONS: usize = 10_000;
 
 /// Upper bound on content-stream operations walked across all Form XObject
 /// expansions for a page. Nested forms are decoded independently of the
 /// page-level operation cap, so this keeps total form work in the same
 /// ballpark as that page cap.
-const MAX_FORM_XOBJECT_OPERATIONS: usize = 1_000_000;
+pub const MAX_FORM_XOBJECT_OPERATIONS: usize = 1_000_000;
 
 /// Shared budget for Form XObject expansion on a page. Bounds both nested DAG
 /// expansion and repeated sibling `/Do` invocations of the same form.
-pub(crate) struct FormWalkBudget {
-    invocations: usize,
-    operations: usize,
-    max_invocations: usize,
-    max_operations: usize,
-    truncated: bool,
+pub struct FormWalkBudget {
+    pub invocations: usize,
+    pub operations: usize,
+    pub max_invocations: usize,
+    pub max_operations: usize,
+    pub truncated: bool,
 }
 
 impl FormWalkBudget {

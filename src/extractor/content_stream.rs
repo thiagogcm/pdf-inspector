@@ -435,7 +435,7 @@ pub(crate) fn extract_page_text_items(
 /// of them the CMap had no entry for, with the run's geometry in the
 /// items' frame so a caller that leaves runs out can leave their codes
 /// out too.
-pub(crate) fn extract_page_text_items_with_options(
+pub fn extract_page_text_items_with_options(
     doc: &Document,
     page_id: ObjectId,
     page_num: u32,

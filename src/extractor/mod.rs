@@ -30,7 +30,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use content_stream::extract_page_text_items_with_options;
+pub use content_stream::extract_page_text_items_with_options;
 pub use content_stream::TextExtractionOptions;
 pub(crate) use display_frame::DisplayPage;
 pub use display_frame::PositionFrame;
@@ -128,7 +128,7 @@ pub use page_box::{visible_page_box, PageBox};
 // Re-export public types so existing `crate::extractor::X` paths keep working.
 pub use crate::text_utils::{is_bold_font, is_italic_font};
 pub use crate::types::{ItemType, TextLine};
-pub(crate) use fonts::FontStyleCache;
+pub use fonts::FontStyleCache;
 pub use layout::detect_columns;
 #[cfg(test)]
 use layout::filter_markdown_page_numbers;
@@ -140,7 +140,7 @@ pub use layout::is_newspaper_layout;
 pub use layout::ColumnRegion;
 pub use layout::{group_into_lines, group_into_lines_preserving_all_text};
 pub(crate) use scripts::merge_subscript_items;
-pub(crate) use xobjects::FormWalkBudget;
+pub use xobjects::{FormWalkBudget, MAX_FORM_XOBJECT_INVOCATIONS, MAX_FORM_XOBJECT_OPERATIONS};
 
 // ---------------------------------------------------------------------------
 // Public API

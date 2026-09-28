@@ -7,7 +7,9 @@ use super::{Failure, Fallible};
 use lopdf::Document;
 use pdf_inspector::extractor::display_frame::document_items_to_display_frame;
 use pdf_inspector::extractor::{
-    extract_positioned_text_impl, CoordinateFrame, TextExtractionOptions,
+    extract_page_text_items_with_options, extract_positioned_text_impl, CoordinateFrame,
+    FontStyleCache, FormWalkBudget, TextExtractionOptions, MAX_FORM_XOBJECT_INVOCATIONS,
+    MAX_FORM_XOBJECT_OPERATIONS,
 };
 use pdf_inspector::markdown::{chart_regions_by_page, PageChartRegions};
 use pdf_inspector::tounicode::FontCMaps;
@@ -42,14 +44,14 @@ pub(super) struct PageContent {
 
 pub(super) fn parse(
     doc: &Document,
+    font_cmaps: &FontCMaps,
     pages: &HashSet<u32>,
     options: TextExtractionOptions,
 ) -> Fallible<PageContent> {
-    let font_cmaps = FontCMaps::from_doc(doc);
     let ((items, rects, lines), _thresholds, gid_pages, rotations, coverage) =
         extract_positioned_text_impl(
             doc,
-            &font_cmaps,
+            font_cmaps,
             Some(pages),
             options,
             None,
@@ -76,6 +78,51 @@ pub(super) fn parse(
         cmap_gaps,
         charts,
     })
+}
+
+/// The selected pages whose extraction skipped a non-empty string shown in
+/// render mode 3, whitespace included, in their own content or a form they
+/// invoke. The core's page extraction reports it and the document-level
+/// parse drops it, so each page is parsed again the way that parse reads it:
+/// one font style cache across the pages, a fresh form budget per page.
+pub(super) fn pages_skipping_invisible(
+    doc: &Document,
+    font_cmaps: &FontCMaps,
+    pages: &HashSet<u32>,
+) -> Fallible<HashSet<u32>> {
+    let mut style_cache = FontStyleCache::default();
+    let mut skipping = HashSet::new();
+    for (number, &page_id) in doc.get_pages().iter() {
+        if !pages.contains(number) {
+            continue;
+        }
+        let (_, _, _, skipped_invisible, _) = extract_page_text_items_with_options(
+            doc,
+            page_id,
+            *number,
+            font_cmaps,
+            TextExtractionOptions::default(),
+            &mut style_cache,
+            &mut form_budget(),
+        )
+        .map_err(Failure::from)?;
+        if skipped_invisible {
+            skipping.insert(*number);
+        }
+    }
+    Ok(skipping)
+}
+
+/// A page's Form XObject budget at the limits the core's own page
+/// extraction starts from.
+fn form_budget() -> FormWalkBudget {
+    FormWalkBudget {
+        invocations: 0,
+        operations: 0,
+        max_invocations: MAX_FORM_XOBJECT_INVOCATIONS,
+        max_operations: MAX_FORM_XOBJECT_OPERATIONS,
+        truncated: false,
+    }
 }
 
 impl PageContent {
