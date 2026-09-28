@@ -2129,7 +2129,7 @@ pub(crate) fn get_font_file2_obj_num(doc: &Document, font_dict: &lopdf::Dictiona
 /// cost repeats per page whenever the descriptor leaves a flag unset
 /// (the common case: regular fonts report neither italic nor bold).
 #[derive(Debug, Default)]
-pub(crate) struct FontStyleCache {
+pub struct FontStyleCache {
     by_font_file: HashMap<ObjectId, FontStyle>,
     /// Blank-glyph codes per embedded font program (see `blank_glyph_codes`),
     /// so a font shared across pages is scanned once.

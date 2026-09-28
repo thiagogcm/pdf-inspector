@@ -295,6 +295,14 @@
 #define PDF_PAGE_NATIVE_RECOVERED 128
 
 /**
+ * `PdfPage.flags`: the page shows a non-empty string in render mode 3,
+ * whitespace included, that the request's extraction skipped. Assessed only
+ * when `PDF_OUT_ANALYSIS` is requested, and never set under
+ * `PDF_REQUEST_INCLUDE_INVISIBLE`, which skips nothing.
+ */
+#define PDF_PAGE_SKIPPED_INVISIBLE 256
+
+/**
  * `PdfPage.reading_order`.
  */
 #define PDF_READING_SINGLE 0

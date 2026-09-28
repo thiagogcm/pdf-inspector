@@ -10,7 +10,7 @@ use crate::text_utils::should_join_items;
 
 /// Result tuple returned by page-level text extraction: text items, rectangles, line segments,
 /// and whether fonts with unresolvable gid-encoded glyphs were encountered.
-pub(crate) type PageExtraction = (Vec<TextItem>, Vec<PdfRect>, Vec<PdfLine>);
+pub type PageExtraction = (Vec<TextItem>, Vec<PdfRect>, Vec<PdfLine>);
 
 /// Per font (its `/BaseFont` name, or its resource name without one), how
 /// the codes shown through the font's CMap fared: the codes shown, the ones
@@ -30,7 +30,7 @@ pub(crate) type CMapCoverageByFont =
 pub(crate) type FontLabel = std::rc::Rc<str>;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RunCoverage {
+pub struct RunCoverage {
     /// The run's `(x, y, width)` in the items' frame; `None` for the
     /// coverage of show operators that no item followed on the page (a
     /// trailing run of blank codes, of codes that read as nothing), which
