@@ -499,7 +499,9 @@ pub struct PdfCMapGap {
 /// `reading_order` is `PDF_READING_*`; `text_orientation` is
 /// `PDF_ORIENTATION_*`, assessed whenever positioned content is parsed
 /// (items, text, or geometry). `columns` are x-only intervals in the
-/// request frame; `charts` are supplemental boxes in that frame.
+/// request frame; `charts` are the chart regions the core masks from
+/// Markdown (rect-backed charts and dense line-grid charts spanning a prose
+/// gutter), in that frame.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfPage {

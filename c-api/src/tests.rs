@@ -1788,6 +1788,85 @@ fn chart_boxes_enclose_the_bars_in_either_frame() {
     }
 }
 
+/// A two-column page of prose above a full-width line chart: a stroked panel
+/// at [72, 300]-[540, 550] around a dense vector grid of 30 vertical and 6
+/// horizontal rules, the shape the core's dense line-chart detector masks.
+fn line_chart_page() -> String {
+    let mut content = String::from("BT /F1 10 Tf\n");
+    for line in 0..8 {
+        let y = 720 - 14 * line;
+        content.push_str(&format!(
+            "1 0 0 1 72 {y} Tm (Quiet rivers carry the long evening light) Tj \
+             1 0 0 1 324 {y} Tm (Tall grasses bend along the northern shore) Tj\n"
+        ));
+    }
+    content.push_str("ET\n72 300 468 250 re S\n");
+    for column in 0..30 {
+        let x = 100 + 14 * column;
+        content.push_str(&format!("{x} 330 m {x} 520 l S\n"));
+    }
+    for row in 0..6 {
+        let y = 330 + 38 * row;
+        content.push_str(&format!("100 {y} m 506 {y} l S\n"));
+    }
+    content
+}
+
+#[test]
+fn chart_boxes_include_dense_line_charts_in_either_frame() {
+    use lopdf::{dictionary, Object};
+    for rotation in [0, 90, 180, 270] {
+        let mut source = single_font_pdf(
+            |doc| {
+                doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" })
+            },
+            &line_chart_page(),
+        );
+        let page = source.get_pages()[&1];
+        source
+            .get_object_mut(page)
+            .and_then(Object::as_dict_mut)
+            .unwrap()
+            .set("Rotate", rotation);
+        let doc = open(source);
+        let mut r = input::default_request();
+        r.outputs = PDF_OUT_GEOMETRY;
+        for frame in [PDF_FRAME_SHEET, PDF_FRAME_DISPLAY] {
+            r.frame = frame;
+            let result = doc.run(&r);
+            let p = &result.pages()[0];
+            let charts = unsafe { input::slice(p.charts.ptr, p.charts.len).unwrap() };
+            let rects = unsafe { input::slice(p.rectangles.ptr, p.rectangles.len).unwrap() };
+            assert_eq!(charts.len(), 1, "rotation {rotation}, frame {frame}");
+            // The grid's region expands to the panel enclosing it.
+            let panel = rects[0].bounds;
+            let chart = charts[0];
+            for (got, want) in [
+                (chart.x0, panel.x0),
+                (chart.y0, panel.y0),
+                (chart.x1, panel.x1),
+                (chart.y1, panel.y1),
+            ] {
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "rotation {rotation}, frame {frame}: {chart:?} vs {panel:?}"
+                );
+            }
+            if frame == PDF_FRAME_SHEET {
+                // Top-left origin on the 792 pt sheet: y runs 792-550..792-300.
+                for (got, want) in [
+                    (chart.x0, 72.0),
+                    (chart.y0, 242.0),
+                    (chart.x1, 540.0),
+                    (chart.y1, 492.0),
+                ] {
+                    assert!((got - want).abs() < 0.01, "rotation {rotation}: {chart:?}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn invisible_text_is_opt_in() {
     let mut source = lopdf::Document::load("../tests/fixtures/cropbox_offset_origin.pdf").unwrap();

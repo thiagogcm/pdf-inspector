@@ -531,9 +531,12 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
                 x1: x0.max(x1),
             }));
             p.charts = storage.slice(
-                pdf_inspector::tables::detect_chart_regions(&page_items, &content.rects, *number)
+                content
+                    .charts
+                    .get(number)
                     .into_iter()
-                    .map(|(x0, y0, x1, y1)| flip_corners(x0, y0, x1, y1, frame_height)),
+                    .flatten()
+                    .map(|&(x0, y0, x1, y1)| flip_corners(x0, y0, x1, y1, frame_height)),
             );
             // The core records only turned pages; absence means upright.
             let turned = content.rotations.get(number).copied();
