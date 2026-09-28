@@ -36,6 +36,7 @@ The adapter runs the core's public API, exactly as the Node and Python bindings 
 | `extractor::{visible_page_box, PageBox}`, `extractor::display_frame::{page_rotate, PageRotate, document_items_to_display_frame}`, `PageRotation::unrotate_box` | visibility | Page frames and the display-frame conversion of runs and path geometry |
 | `extractor::{extract_positioned_text_impl, TextExtractionOptions, CoordinateFrame}` | visibility | One positioned parse yielding runs, rectangles, lines, rotations, gid pages, and CMap coverage, with invisible text opt-in |
 | `extractor::{detect_columns, is_newspaper_layout, ColumnRegion, is_text_layout_item}`, `text_utils::effective_width` | visibility | Column intervals and newspaper vs tabular reading order |
+| `markdown::{chart_regions_by_page, PageChartRegions}` | visibility | Chart boxes are the regions the core masks from Markdown and layout analysis, line charts included |
 | `markdown::{MarkdownDocumentContext, to_markdown_from_items_with_rects_and_lines}` | visibility | Role-aware composition with line segments, without a document |
 | `structure_tree::StructRole::from_name` | visibility | Caller-supplied structure roles for composition |
 | `detector::{DocumentInfo, read_document_info}` | visibility | Read trailer document information metadata directly from Document at open |
@@ -114,7 +115,7 @@ Initialize requests with `pdf_inspector_request_init`. NULL requests have the sa
 | `PDF_OUT_TEXT` | Plain native text grouped into lines, per page and document |
 | `PDF_OUT_ITEMS` | Native positioned runs, including font family/tag, weight class, bold provenance, fixed pitch, paint fill and stroke colours, render mode, styles, URI and Dest/GoTo links (`dest_page`), MCID, rotation, advance availability, baseline shift, and legacy symbol-rewrite provenance |
 | `PDF_OUT_STRUCTURE` | Tagged structure references joined to items through `(page, mcid)` |
-| `PDF_OUT_GEOMETRY` | Native path rectangles, line segments, column intervals, and chart boxes |
+| `PDF_OUT_GEOMETRY` | Native path rectangles, line segments, column intervals, and chart boxes (the regions the core masks from Markdown: rect-backed charts, and dense line-grid charts spanning a prose gutter) |
 | `PDF_OUT_RENDER` | Page pixels, dimensions, stride, format, and coordinate transforms |
 | `PDF_OUT_ANALYSIS` | Native layout assessment, OCR reasons, and per-page encoding-issue flags, without text or Markdown output |
 
