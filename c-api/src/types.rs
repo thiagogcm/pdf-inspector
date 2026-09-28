@@ -135,11 +135,6 @@ pub const PDF_PAGE_HOSTED_RECOMMENDED: u32 = 16;
 pub const PDF_PAGE_ENCODING_ISSUES: u32 = 32;
 pub const PDF_PAGE_GID_ENCODED: u32 = 64;
 pub const PDF_PAGE_NATIVE_RECOVERED: u32 = 128;
-/// `PdfPage.flags`: the page shows a non-empty string in render mode 3,
-/// whitespace included, that the request's extraction skipped. Assessed only
-/// when `PDF_OUT_ANALYSIS` is requested, and never set under
-/// `PDF_REQUEST_INCLUDE_INVISIBLE`, which skips nothing.
-pub const PDF_PAGE_SKIPPED_INVISIBLE: u32 = 256;
 /// `PdfPage.reading_order`.
 pub const PDF_READING_SINGLE: u32 = 0;
 pub const PDF_READING_TABULAR: u32 = 1;
@@ -504,9 +499,7 @@ pub struct PdfCMapGap {
 /// `reading_order` is `PDF_READING_*`; `text_orientation` is
 /// `PDF_ORIENTATION_*`, assessed whenever positioned content is parsed
 /// (items, text, or geometry). `columns` are x-only intervals in the
-/// request frame; `charts` are the chart regions the core masks from
-/// Markdown (rect-backed charts and dense line-grid charts spanning a prose
-/// gutter), in that frame.
+/// request frame; `charts` are supplemental boxes in that frame.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfPage {

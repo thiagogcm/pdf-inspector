@@ -1,6 +1,5 @@
-//! One positioned parse of the selected pages: runs, path geometry, chart
-//! regions, and the per-page signals the core's extraction engine reports
-//! alongside them.
+//! One positioned parse of the selected pages: runs, path geometry, and the
+//! per-page signals the core's extraction engine reports alongside them.
 
 use super::frames::PageFrame;
 use super::{Failure, Fallible};
@@ -9,7 +8,6 @@ use pdf_inspector::extractor::display_frame::document_items_to_display_frame;
 use pdf_inspector::extractor::{
     extract_positioned_text_impl, CoordinateFrame, TextExtractionOptions,
 };
-use pdf_inspector::markdown::{chart_regions_by_page, PageChartRegions};
 use pdf_inspector::tounicode::FontCMaps;
 use pdf_inspector::{PageRotation, PdfLine, PdfRect, TextItem};
 use std::collections::{HashMap, HashSet};
@@ -35,21 +33,18 @@ pub(super) struct PageContent {
     /// Pages that met fonts with unresolvable gid-encoded glyphs.
     pub gid_pages: HashSet<u32>,
     pub cmap_gaps: Vec<CMapGap>,
-    /// Chart regions by page, as opposite corners: the regions the core
-    /// masks from Markdown and layout analysis, measured in the sheet frame.
-    pub charts: PageChartRegions,
 }
 
 pub(super) fn parse(
     doc: &Document,
-    font_cmaps: &FontCMaps,
     pages: &HashSet<u32>,
     options: TextExtractionOptions,
 ) -> Fallible<PageContent> {
+    let font_cmaps = FontCMaps::from_doc(doc);
     let ((items, rects, lines), _thresholds, gid_pages, rotations, coverage) =
         extract_positioned_text_impl(
             doc,
-            font_cmaps,
+            &font_cmaps,
             Some(pages),
             options,
             None,
@@ -66,7 +61,6 @@ pub(super) fn parse(
             unmapped: stats.unmapped,
         })
         .collect();
-    let charts = chart_regions_by_page(&items, &rects, &lines);
     Ok(PageContent {
         items,
         rects,
@@ -74,14 +68,12 @@ pub(super) fn parse(
         rotations,
         gid_pages,
         cmap_gaps,
-        charts,
     })
 }
 
 impl PageContent {
-    /// Move every run, rectangle, line segment, and chart region from the
-    /// sheet frame to the display frame: untwist the page turn, then apply
-    /// `/Rotate`.
+    /// Move every run, rectangle, and line segment from the sheet frame to
+    /// the display frame: untwist the page turn, then apply `/Rotate`.
     pub(super) fn move_to_display(&mut self, doc: &Document, frames: &[PageFrame]) {
         document_items_to_display_frame(doc, &mut self.items, &self.rotations);
         let frame = |page: u32| {
@@ -110,17 +102,6 @@ impl PageContent {
                 let (dx, dy, _, _) = to_display(&frame, turn, *x, *y, 0.0, 0.0);
                 *x = dx;
                 *y = dy;
-            }
-        }
-        for (page, regions) in &mut self.charts {
-            let Some(frame) = frame(*page) else {
-                continue;
-            };
-            let turn = self.rotations.get(page).copied();
-            for region in regions {
-                let (x0, y0, x1, y1) = *region;
-                let (x, y, width, height) = to_display(&frame, turn, x0, y0, x1 - x0, y1 - y0);
-                *region = (x, y, x + width, y + height);
             }
         }
     }
