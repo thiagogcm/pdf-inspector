@@ -777,6 +777,217 @@ fn type1_font_without_encoding_reads_through_its_programs_encoding() {
     assert_eq!(items, "Andeffect");
 }
 
+/// A subset Type0 font over a TrueType CID font, no program embedded, whose
+/// ToUnicode CMap maps `entries` code to character, whose `/CIDToGIDMap`
+/// stream gives each CID its glyph index, and whose `/W` array is `widths`.
+fn cid_subset_font(
+    doc: &mut lopdf::Document,
+    entries: &[(u16, char)],
+    cid_to_gid: &[u16],
+    widths: Vec<lopdf::Object>,
+) -> lopdf::ObjectId {
+    use lopdf::{dictionary, Object, Stream};
+    let mut cmap = format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Adobe-Identity-UCS def /CMapType 2 def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n{} beginbfchar\n",
+        entries.len()
+    );
+    for &(code, ch) in entries {
+        cmap.push_str(&format!("<{code:04X}> <{:04X}>\n", ch as u32));
+    }
+    cmap.push_str("endbfchar endcmap\nCMapName currentdict /CMap defineresource pop end end\n");
+    let cmap = doc.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+    let cid_to_gid = doc.add_object(Stream::new(
+        dictionary! {},
+        cid_to_gid
+            .iter()
+            .flat_map(|gid| gid.to_be_bytes())
+            .collect(),
+    ));
+    let descriptor = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor", "FontName" => "AAAAAA+Subset", "Flags" => 32,
+        "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
+        "ItalicAngle" => 0, "Ascent" => 800, "Descent" => -200, "CapHeight" => 700,
+        "StemV" => 80,
+    });
+    let cid_font = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "AAAAAA+Subset",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "FontDescriptor" => descriptor, "DW" => 500, "W" => widths,
+        "CIDToGIDMap" => cid_to_gid,
+    });
+    doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "AAAAAA+Subset",
+        "Encoding" => "Identity-H", "DescendantFonts" => vec![cid_font.into()],
+        "ToUnicode" => cmap,
+    })
+}
+
+/// The plain-text lines of a page showing `lines`, each line a TJ of
+/// strings. Each string shown before the font chooses between its CMap and
+/// a repair of it reads through whichever of the two reads it better.
+fn cid_subset_lines(
+    entries: &[(u16, char)],
+    cid_to_gid: &[u16],
+    widths: Vec<lopdf::Object>,
+    lines: &[Vec<&str>],
+) -> Vec<String> {
+    let cid = |ch: char| entries.iter().find(|&&(_, c)| c == ch).unwrap().0;
+    let content: String = lines
+        .iter()
+        .enumerate()
+        .map(|(line, strings)| {
+            let strings: Vec<String> = strings
+                .iter()
+                .map(|s| {
+                    let hex: String = s.chars().map(|ch| format!("{:04X}", cid(ch))).collect();
+                    format!("<{hex}>")
+                })
+                .collect();
+            format!(
+                "BT /F1 12 Tf 72 {} Td [{}] TJ ET\n",
+                700 - 30 * line,
+                strings.join(" ")
+            )
+        })
+        .collect();
+    let (_, _, text, _) = page_readings(single_font_pdf(
+        |doc| cid_subset_font(doc, entries, cid_to_gid, widths),
+        &content,
+    ));
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn cid_keyed_cmap_keeps_its_reading_under_a_cid_to_gid_map() {
+    // A CMap keyed by CID, right as written, beside a CIDToGIDMap that sends
+    // the CID of `m` to the glyph index that is the CID of `a`, each glyph
+    // shown as a string of its own: read through the map, a lone `m` spells
+    // the common word `a`, which a string of one glyph is too short to be
+    // evidence for.
+    let text = "Stakeholder engagement";
+    let mut entries: Vec<(u16, char)> = text.chars().map(|ch| (0x0100 + ch as u16, ch)).collect();
+    entries.sort();
+    entries.dedup();
+    let mut gids: Vec<u16> = (0..=0x0100 + 'z' as u16).collect();
+    gids[usize::from(0x0100 + 'm' as u16)] = 0x0100 + 'a' as u16;
+    let widths = vec![
+        0x0100.into(),
+        vec![lopdf::Object::Integer(500); 0x80].into(),
+    ];
+    let glyphs = text
+        .char_indices()
+        .map(|(i, ch)| &text[i..i + ch.len_utf8()]);
+    assert_eq!(
+        cid_subset_lines(&entries, &gids, widths, &[glyphs.collect()]),
+        [text]
+    );
+
+    // A Latin subset whose CIDs are the characters less 28, typographic
+    // punctuation at high CIDs, under a map that numbers the glyphs 1, 2,
+    // 3, … in CID order, each quoted word shown as one string: the CMap has
+    // entries for more of the codes the map moves than for the glyph
+    // indexes they move to, so it is not read through the map (which spells
+    // `“me”` as `yaYz`).
+    let mut entries: Vec<(u16, char)> = Vec::new();
+    for (first, last, ch) in [
+        (0x04, 0x04, ' '),
+        (0x08, 0x1F, '$'),
+        (0x22, 0x22, '>'),
+        (0x24, 0x3F, '@'),
+        (0x41, 0x41, ']'),
+        (0x43, 0x43, '_'),
+        (0x45, 0x5E, 'a'),
+        (0x60, 0x60, '|'),
+        (0x62, 0x62, '~'),
+        (0x63, 0x63, '\u{00A0}'),
+        (0x6C, 0x6C, '©'),
+        (0x71, 0x71, '®'),
+        (0x73, 0x73, '°'),
+        (0x164, 0x165, '–'),
+        (0x166, 0x167, '‘'),
+        (0x169, 0x16A, '“'),
+        (0x16E, 0x16E, '•'),
+        (0x177, 0x177, '™'),
+    ] {
+        for (cid, ch) in (first..=last).zip(ch as u32..) {
+            entries.push((cid, char::from_u32(ch).unwrap()));
+        }
+    }
+    let mut gids = vec![0u16; 0x178];
+    for (glyph, &(cid, _)) in (1..).zip(&entries) {
+        gids[usize::from(cid)] = glyph;
+    }
+    let widths = vec![0.into(), vec![lopdf::Object::Integer(500); 0x178].into()];
+    let words = ["“me”", "“so”.", "“up”."];
+    let lines: Vec<Vec<&str>> = words.iter().map(|word| vec![*word]).collect();
+    assert_eq!(cid_subset_lines(&entries, &gids, widths, &lines), words);
+}
+
+#[test]
+fn exponent_whose_sign_is_set_a_size_above_its_digit_stays_a_superscript() {
+    use lopdf::{dictionary, Document, Object, Stream};
+    // "cm⁻³": the exponent's minus is set from a slanted symbol face, as
+    // TeX's is, a design size above its digit (7.89 pt against 7.57 pt,
+    // beside 10.16 pt text); the slant keeps the two runs apart until the
+    // script pass. The run is sized by its digit, which a superscript's may
+    // be.
+    let content = "BT /F1 10.16 Tf 200 192.13 Td (pc cm) Tj ET\n\
+                   BT /F2 7.89 Tf 227.2 195.75 Td (-) Tj ET\n\
+                   BT /F1 7.57 Tf 231.9 195.75 Td (3) Tj ET\n\
+                   BT /F1 10.16 Tf 236.2 192.13 Td (\\), were) Tj ET\n";
+    let mut doc = Document::with_version("1.5");
+    let pages = doc.new_object_id();
+    let text = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
+    });
+    let signs = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Italic",
+        "Encoding" => dictionary! {
+            "Type" => "Encoding", "BaseEncoding" => "WinAnsiEncoding",
+            "Differences" => vec![45.into(), Object::Name(b"minus".to_vec())],
+        },
+    });
+    let stream = doc.add_object(Stream::new(dictionary! {}, content.as_bytes().to_vec()));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => text, "F2" => signs } },
+        "Contents" => stream,
+    });
+    doc.objects.insert(
+        pages,
+        dictionary! { "Type" => "Pages", "Count" => 1, "Kids" => vec![page.into()] }.into(),
+    );
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    doc.trailer.set("Root", catalog);
+    let doc = open(doc);
+    let mut r = input::default_request();
+    r.outputs = PDF_OUT_ITEMS;
+    let result = doc.run(&r);
+    let page = &result.pages()[0];
+    let items = unsafe { input::slice(page.items.ptr, page.items.len).unwrap() };
+    let runs: Vec<_> = items
+        .iter()
+        .map(|i| (unsafe { string(i.text) }, i.font_size, i.baseline_shift))
+        .collect();
+    let exponent = runs
+        .iter()
+        .find(|(text, _, _)| text == "\u{2212}3")
+        .unwrap_or_else(|| panic!("the exponent is one run: {runs:?}"));
+    assert!((exponent.2 - 3.62).abs() < 0.01, "{runs:?}");
+}
+
 #[test]
 fn legacy_symbol_rewrite_is_item_flag_and_survives_composition() {
     let doc = open(symbol_rewrite_pdf());
