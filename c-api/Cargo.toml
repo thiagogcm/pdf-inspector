@@ -15,6 +15,10 @@ name = "pdf_inspector_c"
 bumpalo = { version = "3.20", features = ["collections"] }
 lopdf = "0.45.0"
 pdf-inspector = { path = "..", features = ["vision"] }
+# The core's OCR backend loads ONNX Runtime through `ort`; the C API names the
+# file to that same crate (same pinned version, so one instance) so that a
+# host can load it explicitly instead of through ORT_DYLIB_PATH.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.3"
@@ -22,5 +26,5 @@ tempfile = "3.3"
 [features]
 default = []
 model-download = ["pdf-inspector/model-download"]
-ocr = ["model-download", "pdf-inspector/ocr", "render-pdfium"]
+ocr = ["model-download", "pdf-inspector/ocr", "render-pdfium", "dep:ort"]
 render-pdfium = ["pdf-inspector/render-pdfium"]

@@ -968,6 +968,39 @@ int32_t pdf_inspector_prepare_runtime(const PdfRuntimeOptions *options,
                                       PdfError **error);
 
 /**
+ * Load PDFium for this process from the file at `path`: UTF-8 and absolute,
+ * so the dynamic linker opens that file and never searches. Call it before
+ * the first render, OCR request or runtime preparation.
+ *
+ * Without this call, the first use searches for PDFium (the
+ * `PDFIUM_LIB_PATH` environment variable, beside the executable,
+ * `./target/pdfium`, then the system search path). After it, that search is
+ * never made. A process holds one PDFium: calling again with the same file
+ * succeeds and does nothing, and another file fails with
+ * `PDF_INVALID_ARGUMENT`, as does any file once a search has loaded one.
+ * `PDF_UNSUPPORTED` means rendering was not compiled in; `PDF_RUNTIME_ERROR`
+ * means the file could not be loaded or does not export PDFium's API.
+ */
+int32_t pdf_inspector_pdfium_load(PdfBytes path, PdfError **error);
+
+/**
+ * Load ONNX Runtime for this process from the file at `path`: UTF-8 and
+ * absolute, so the dynamic linker opens that file and never searches. Call it
+ * before the first OCR request or OCR runtime preparation.
+ *
+ * Without this call, OCR loads the file named by the `ORT_DYLIB_PATH`
+ * environment variable, or else the platform library name through the system
+ * search path. After it, that lookup is never made. A process holds one ONNX
+ * Runtime: calling again with the same file succeeds and does nothing, and
+ * another file fails with `PDF_INVALID_ARGUMENT`. Once OCR has loaded ONNX
+ * Runtime through its own lookup, this call cannot replace it and reports
+ * success. `PDF_UNSUPPORTED` means native OCR was not compiled in;
+ * `PDF_RUNTIME_ERROR` means the file could not be loaded, does not export
+ * ONNX Runtime's API, or is older than the API OCR needs.
+ */
+int32_t pdf_inspector_onnxruntime_load(PdfBytes path, PdfError **error);
+
+/**
  * Initialize a request to all pages, inspection and Markdown, with OCR off.
  */
 int32_t pdf_inspector_request_init(PdfRequest *out);

@@ -2212,6 +2212,40 @@ fn panic_is_reported_without_publishing_result() {
     }
 }
 
+#[test]
+fn runtime_loaders_take_only_absolute_files() {
+    type Loader = unsafe extern "C" fn(PdfBytes, *mut *mut PdfError) -> i32;
+    let loaders: [(Loader, bool); 2] = [
+        (pdf_inspector_pdfium_load, cfg!(feature = "render-pdfium")),
+        (pdf_inspector_onnxruntime_load, cfg!(feature = "ocr")),
+    ];
+    for (load, compiled) in loaders {
+        unsafe {
+            let mut error = null_mut();
+            assert_eq!(
+                load(view(b"libruntime.so"), &mut error),
+                PDF_INVALID_ARGUMENT
+            );
+            assert!(string((*error).message).contains("must be absolute"));
+            pdf_inspector_error_free(error);
+
+            assert_eq!(load(PdfBytes::default(), null_mut()), PDF_INVALID_ARGUMENT);
+
+            let mut error = null_mut();
+            let missing = b"/nonexistent/pdf-inspector/libruntime.so";
+            let status = load(view(missing), &mut error);
+            let expected = if compiled {
+                PDF_RUNTIME_ERROR
+            } else {
+                PDF_UNSUPPORTED
+            };
+            assert_eq!(status, expected);
+            assert!(!error.is_null());
+            pdf_inspector_error_free(error);
+        }
+    }
+}
+
 #[cfg(feature = "render-pdfium")]
 #[test]
 fn render_runtime_coordinates_and_reuse() {

@@ -185,6 +185,24 @@ unsafe fn publish_value<T>(
         ),
     }
 }
+/// Run `f`, which publishes nothing on success. Panics are caught and
+/// reported as `PDF_PANIC`.
+unsafe fn run(error: *mut *mut PdfError, f: impl FnOnce() -> Fallible<()>) -> i32 {
+    if !error.is_null() {
+        error.write(ptr::null_mut());
+    }
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(())) => PDF_OK,
+        Ok(Err(failure)) => fail(error, failure),
+        Err(_) => fail(
+            error,
+            Failure {
+                status: PDF_PANIC,
+                message: "processing panicked".into(),
+            },
+        ),
+    }
+}
 /// Publish an owner's pointer to `out`.
 unsafe fn publish<O: Owner>(
     out: *mut *mut O::Public,
@@ -261,6 +279,45 @@ pub unsafe extern "C" fn pdf_inspector_prepare_runtime(
             runtime::defaults,
         )?)
     })
+}
+/// Load PDFium for this process from the file at `path`: UTF-8 and absolute,
+/// so the dynamic linker opens that file and never searches. Call it before
+/// the first render, OCR request or runtime preparation.
+///
+/// Without this call, the first use searches for PDFium (the
+/// `PDFIUM_LIB_PATH` environment variable, beside the executable,
+/// `./target/pdfium`, then the system search path). After it, that search is
+/// never made. A process holds one PDFium: calling again with the same file
+/// succeeds and does nothing, and another file fails with
+/// `PDF_INVALID_ARGUMENT`, as does any file once a search has loaded one.
+/// `PDF_UNSUPPORTED` means rendering was not compiled in; `PDF_RUNTIME_ERROR`
+/// means the file could not be loaded or does not export PDFium's API.
+#[no_mangle]
+pub unsafe extern "C" fn pdf_inspector_pdfium_load(
+    path: PdfBytes,
+    error: *mut *mut PdfError,
+) -> i32 {
+    run(error, || runtime::load_pdfium(input::path(path)?))
+}
+/// Load ONNX Runtime for this process from the file at `path`: UTF-8 and
+/// absolute, so the dynamic linker opens that file and never searches. Call it
+/// before the first OCR request or OCR runtime preparation.
+///
+/// Without this call, OCR loads the file named by the `ORT_DYLIB_PATH`
+/// environment variable, or else the platform library name through the system
+/// search path. After it, that lookup is never made. A process holds one ONNX
+/// Runtime: calling again with the same file succeeds and does nothing, and
+/// another file fails with `PDF_INVALID_ARGUMENT`. Once OCR has loaded ONNX
+/// Runtime through its own lookup, this call cannot replace it and reports
+/// success. `PDF_UNSUPPORTED` means native OCR was not compiled in;
+/// `PDF_RUNTIME_ERROR` means the file could not be loaded, does not export
+/// ONNX Runtime's API, or is older than the API OCR needs.
+#[no_mangle]
+pub unsafe extern "C" fn pdf_inspector_onnxruntime_load(
+    path: PdfBytes,
+    error: *mut *mut PdfError,
+) -> i32 {
+    run(error, || runtime::load_onnx_runtime(input::path(path)?))
 }
 /// Initialize a request to all pages, inspection and Markdown, with OCR off.
 #[no_mangle]
