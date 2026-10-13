@@ -1410,6 +1410,7 @@ fn compose_reconstructs_font_metadata_fields() {
         width: 200.0,
         height: 100.0,
         rotation: 0,
+        user_unit: 1.0,
     };
     let input = compose_one_item(&info, &item);
     let mut options = input::default_markdown();
@@ -1456,6 +1457,7 @@ fn compose_accepts_dest_page_without_uri() {
         width: 200.0,
         height: 100.0,
         rotation: 0,
+        user_unit: 1.0,
     };
     compose_ok(&compose_one_item(&info, &item), null());
     let mut missing = item;
@@ -2352,14 +2354,14 @@ fn emit_c_layout_contract() {
     record!(PdfContentReference; page, mcid);
     record!(PdfRectangle; page, bounds);
     record!(PdfSegment; page, start, end);
-    record!(PdfPageInfo; page, width, height, rotation);
+    record!(PdfPageInfo; page, width, height, rotation, user_unit);
     record!(PdfComposeInput; pages, items, rectangles, lines, structure);
     record!(PdfImage; width, height, stride, format, pixels, pixel_to_page, page_to_pixel);
     record!(PdfProvenance; source, flags, confidence, render_dpi, render_ms, ocr_ms, assembly_ms, model, model_revision, warnings);
     record!(PdfInterval; x0, x1);
     record!(PdfLoadAudit; flags, leading_bytes, widened_form_bboxes, saturated_bbox_numerals);
     record!(PdfCMapGap; font, codes, interpolated, unmapped);
-    record!(PdfPage; info, flags, reading_order, text_orientation, markdown, text, ocr_reasons, items, columns, charts, structure, rectangles, lines, image, provenance);
+    record!(PdfPage; info, flags, reading_order, text_orientation, markdown, text, ocr_reasons, items, columns, charts, structure, rectangles, lines, image, provenance, image_coverage, ocr_spans);
     record!(PdfCell; row, column, row_span, column_span, flags, bounds, text);
     record!(PdfRegion; page, kind, flags, bounds, text, ocr_reason, tokens, cells);
     record!(PdfTable; page, bounds, markdown, fallback_reason, cells);

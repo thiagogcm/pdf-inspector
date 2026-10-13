@@ -39,6 +39,7 @@ c_slices! {
     PdfStructureNodes => PdfStructureNode;
     PdfContentReferences => PdfContentReference;
     PdfCMapGaps => PdfCMapGap;
+    PdfOcrSpans => PdfOcrSpan;
 }
 impl Storage {
     pub(super) fn bytes(&self, bytes: impl AsRef<[u8]>) -> PdfBytes {

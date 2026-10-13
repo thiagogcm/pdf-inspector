@@ -351,3 +351,83 @@ fn dest_goto_annot_forwards_dest_page() {
         "Dest/GoTo annots must surface dest_page on extra C link items"
     );
 }
+
+#[test]
+fn raster_coverage_measures_drawn_images_without_double_counting_or_resource_inventory() {
+    let doc = open(document(
+        &[
+            "q 600 0 0 800 0 0 cm /Im1 Do Q",
+            "",
+            "q 300 0 0 800 0 0 cm /Im1 Do /Im1 Do Q",
+        ],
+        true,
+    ));
+    let mut request = input::default_request();
+    request.outputs = PDF_OUT_ANALYSIS;
+    let result = doc.run(&request);
+    let pages = result.pages();
+    assert_eq!(pages.len(), 3);
+    for page in pages {
+        assert_ne!(page.flags & PDF_PAGE_IMAGE_COVERAGE, 0);
+    }
+    assert_eq!(pages[0].image_coverage, 1.0);
+    assert_eq!(pages[1].image_coverage, 0.0);
+    assert_eq!(pages[2].image_coverage, 0.5);
+}
+
+#[test]
+fn page_units_are_page_local_and_invalid_values_fail_at_open() {
+    let mut source = document(&["", ""], false);
+    let pages = source.get_pages();
+    source
+        .get_dictionary_mut(pages[&1])
+        .unwrap()
+        .set("UserUnit", 1.25f32);
+    let parent = source
+        .get_dictionary(pages[&1])
+        .unwrap()
+        .get(b"Parent")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    source
+        .get_dictionary_mut(parent)
+        .unwrap()
+        .set("UserUnit", 9.0f32);
+    let doc = open(source.clone());
+    let infos = unsafe { input::slice(doc.info().pages.ptr, doc.info().pages.len).unwrap() };
+    assert_eq!(infos[0].user_unit, 1.25);
+    assert_eq!(infos[1].user_unit, 1.0);
+    source
+        .get_dictionary_mut(pages[&1])
+        .unwrap()
+        .set("UserUnit", 75_000);
+    let maximum = open(source.clone());
+    assert_eq!(
+        unsafe { input::slice(maximum.info().pages.ptr, 1).unwrap() }[0].user_unit,
+        75_000.0
+    );
+    for invalid in [0, -1, 75_001] {
+        source
+            .get_dictionary_mut(pages[&1])
+            .unwrap()
+            .set("UserUnit", invalid);
+        let mut bytes = Vec::new();
+        source.save_to(&mut bytes).unwrap();
+        unsafe {
+            let input = PdfSource {
+                kind: PDF_SOURCE_BYTES,
+                data: view(&bytes),
+                password: PdfBytes::default(),
+            };
+            let mut handle = null_mut();
+            let mut error = null_mut();
+            assert_eq!(
+                pdf_inspector_open(&input, &mut handle, &mut error),
+                PDF_PARSE_ERROR
+            );
+            assert!(handle.is_null());
+            pdf_inspector_error_free(error);
+        }
+    }
+}

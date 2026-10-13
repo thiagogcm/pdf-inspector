@@ -4,7 +4,7 @@
 
 /// A box in user space, `x0 <= x1` and `y0 <= y1`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct UserBox {
+pub struct UserBox {
     pub(super) x0: f64,
     pub(super) y0: f64,
     pub(super) x1: f64,
@@ -12,7 +12,7 @@ pub(super) struct UserBox {
 }
 
 impl UserBox {
-    pub(super) fn area(&self) -> f64 {
+    pub fn area(&self) -> f64 {
         (self.x1 - self.x0) * (self.y1 - self.y0)
     }
 

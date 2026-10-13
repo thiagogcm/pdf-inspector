@@ -50,6 +50,11 @@
 #define PDF_OUT_ANALYSIS 128
 
 /**
+ * Raw recognition spans, independent of the native/Markdown fusion verdict.
+ */
+#define PDF_OUT_OCR_SPANS 256
+
+/**
  * `PdfRequest.flags`: also treat a weight class at or above
  * `bold_weight_threshold` as bold.
  */
@@ -301,6 +306,11 @@
  * `PDF_REQUEST_INCLUDE_INVISIBLE`, which skips nothing.
  */
 #define PDF_PAGE_SKIPPED_INVISIBLE 256
+
+/**
+ * `image_coverage` carries the detector's completed executed-image coverage estimate.
+ */
+#define PDF_PAGE_IMAGE_COVERAGE 512
 
 /**
  * `PdfPage.reading_order`.
@@ -630,6 +640,10 @@ typedef struct {
   float width;
   float height;
   uint32_t rotation;
+  /**
+   * Page-local `/UserUnit`, default 1. Page coordinates remain native units.
+   */
+  float user_unit;
 } PdfPageInfo;
 
 typedef struct {
@@ -798,6 +812,14 @@ typedef struct {
   PdfSegments lines;
   PdfImage image;
   PdfProvenance provenance;
+  /**
+   * Detector grid estimate in [0, 1], present only with PDF_PAGE_IMAGE_COVERAGE.
+   */
+  double image_coverage;
+  /**
+   * Raw OCR spans in the request frame, in native page units. Never fused with native text.
+   */
+  PdfOcrSpans ocr_spans;
 } PdfPage;
 
 typedef struct {

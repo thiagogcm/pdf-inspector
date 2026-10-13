@@ -103,7 +103,7 @@ impl DocumentState {
             (bytes, doc)
         };
         let pages = doc.get_pages();
-        let frames = PageFrame::all(&doc);
+        let frames = PageFrame::all(&doc)?;
         let storage = Storage::default();
         let doc_info = pdf_inspector::detector::read_document_info(&doc);
         let info = PdfDocumentInfo {
@@ -170,7 +170,8 @@ const ALL_OUTPUTS: u32 = PDF_OUT_INSPECTION
     | PDF_OUT_STRUCTURE
     | PDF_OUT_GEOMETRY
     | PDF_OUT_RENDER
-    | PDF_OUT_ANALYSIS;
+    | PDF_OUT_ANALYSIS
+    | PDF_OUT_OCR_SPANS;
 
 pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<ResultOwner> {
     let started = Instant::now();
@@ -221,6 +222,11 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     let external_pages = external.iter().map(|p| p.page).collect::<HashSet<_>>();
     let config = detection(r.detection, state.count())?;
     let ocr_on = r.ocr.mode != PDF_OCR_OFF;
+    if r.outputs & PDF_OUT_OCR_SPANS != 0 && r.outputs & PDF_OUT_MARKDOWN != 0 {
+        return Err(Failure::invalid(
+            "raw OCR spans and fused Markdown are separate requests",
+        ));
+    }
     let want_content = r.outputs & (PDF_OUT_TEXT | PDF_OUT_ITEMS | PDF_OUT_GEOMETRY) != 0;
     let want_pages = r.outputs & (PDF_OUT_MARKDOWN | PDF_OUT_ANALYSIS) != 0 || !external.is_empty();
 
@@ -264,7 +270,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     for page in ocr.pages {
         final_pages.insert(page.page_number, page);
     }
-    let ocr_covers_all = ocr_on && external.is_empty();
+    let ocr_covers_all = ocr_on && external.is_empty() && r.outputs & PDF_OUT_OCR_SPANS == 0;
 
     // 3. Native per-page pass (Markdown, OCR routing, layout flags).
     let mut native = if want_pages && !ocr_covers_all {
@@ -401,6 +407,30 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             info: page_frame.info(frame),
             ..PdfPage::default()
         };
+        if r.outputs & PDF_OUT_ANALYSIS != 0 {
+            if let Some(coverage) = image_coverage(doc, state.pages[number]) {
+                p.image_coverage = coverage;
+                p.flags |= PDF_PAGE_IMAGE_COVERAGE;
+            }
+        }
+        if r.outputs & PDF_OUT_OCR_SPANS != 0 {
+            if let Some(recognized) = ocr.recognized.iter().find(|p| p.ocr.page_number == *number) {
+                p.ocr_spans = recognized_spans(&storage, recognized, page_frame, frame);
+                p.flags |= PDF_PAGE_OCR_RAN;
+                p.provenance = PdfProvenance {
+                    source: PDF_CONTENT_OCR,
+                    flags: u32::from(recognized.ocr.mean_confidence.is_some()) * PDF_HAS_CONFIDENCE,
+                    confidence: recognized.ocr.mean_confidence.unwrap_or(0.0),
+                    render_dpi: r.render.dpi,
+                    render_ms: recognized.render_ms,
+                    ocr_ms: recognized.ocr.processing_time_ms,
+                    model: storage.bytes(&recognized.ocr.model.name),
+                    model_revision: storage.bytes(&recognized.ocr.model.revision),
+                    warnings: storage.strings(&recognized.ocr.warnings),
+                    ..PdfProvenance::default()
+                };
+            }
+        }
         let native_page = native
             .as_ref()
             .and_then(|n| n.pages.iter().find(|p| p.page + 1 == *number));
@@ -596,6 +626,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
 /// Native OCR results for the locally processed pages.
 #[derive(Default)]
 struct OcrOutcome {
+    recognized: Vec<RecognizedPage>,
     ran: bool,
     pages: Vec<FusedPageMarkdown>,
     tables: Vec<u32>,
@@ -617,6 +648,9 @@ unsafe fn native_ocr(
     if mode == pdf_inspector::vision::OcrMode::Off || local_pages.is_empty() {
         return Ok(OcrOutcome::default());
     }
+    if r.outputs & PDF_OUT_OCR_SPANS != 0 {
+        return raw_ocr(state, r, render_options, mode, local_pages);
+    }
     let options = pdf_inspector::vision::OcrPdfOptions::new()
         .page_numbers(local_pages.iter().copied())
         .markdown(md.clone())
@@ -635,6 +669,7 @@ unsafe fn native_ocr(
     let result = pdf_inspector::vision::process_pdf_with_ocr_mem(&state.bytes, options)
         .map_err(Failure::runtime)?;
     Ok(OcrOutcome {
+        recognized: Vec::new(),
         ran: true,
         pages: result.pages,
         tables: result.pages_with_tables,
@@ -644,6 +679,139 @@ unsafe fn native_ocr(
         reasons: result.ocr_reasons_by_page,
         markdown: Some(result.markdown),
     })
+}
+
+struct RecognizedPage {
+    ocr: OcrPage,
+    transform: PageTransform,
+    render_ms: u64,
+}
+
+#[cfg(feature = "ocr")]
+unsafe fn raw_ocr(
+    state: &DocumentState,
+    r: &PdfRequest,
+    render: &pdf_inspector::vision::RenderOptions,
+    mode: pdf_inspector::vision::OcrMode,
+    selected: &[u32],
+) -> Fallible<OcrOutcome> {
+    use pdf_inspector::vision::{
+        cached_ocr_engine, route_ocr_pages, run_ocr_pages, ModelDownloadPolicy, OcrOptions,
+    };
+    let inspection = state.inspection(r.detection, detection(r.detection, state.count())?)?;
+    let routed = route_ocr_pages(
+        mode,
+        state.count(),
+        &inspection.pages_needing_ocr,
+        Some(selected),
+    )
+    .map_err(Failure::runtime)?;
+    let mut recognized = Vec::new();
+    if !routed.is_empty() {
+        let renderer = super::runtime::renderer()?;
+        let options = OcrOptions {
+            mode,
+            minimum_confidence: r.ocr.minimum_confidence,
+            model_directory: optional_text(r.ocr.model_directory)?.map(Into::into),
+            model_downloads: if r.ocr.download_policy == PDF_DOWNLOAD_OFFLINE {
+                ModelDownloadPolicy::Offline
+            } else {
+                ModelDownloadPolicy::IfMissing
+            },
+        };
+        let engine = cached_ocr_engine(&options).map_err(Failure::runtime)?;
+        // Retain observations, never bitmap bytes, across page boundaries.
+        for number in &routed {
+            let run = run_ocr_pages(
+                renderer,
+                engine.as_ref(),
+                &state.bytes,
+                &[*number],
+                None,
+                render,
+                &options,
+            )
+            .map_err(Failure::runtime)?;
+            recognized.extend(run.pages.into_iter().map(|page| RecognizedPage {
+                transform: page.rendered.transform(),
+                ocr: page.ocr,
+                render_ms: run.render_time_ms,
+            }));
+        }
+    }
+    Ok(OcrOutcome {
+        ran: !routed.is_empty(),
+        recognized,
+        needs: inspection.pages_needing_ocr.clone(),
+        routed,
+        ..OcrOutcome::default()
+    })
+}
+
+fn image_coverage(doc: &Document, page: ObjectId) -> Option<f64> {
+    // The core scanner falls back to raw bytes on a page-stream decode failure.
+    // That is useful for classification recovery, but cannot establish coverage.
+    for id in doc.get_page_contents(page) {
+        let stream = doc.get_object(id).ok()?.as_stream().ok()?;
+        if stream.dict.has(b"Filter")
+            && (stream.filters().is_err()
+                || stream.decompressed_content_with_limit(32 << 20).is_err())
+        {
+            return None;
+        }
+    }
+    let (state, _) = pdf_inspector::detector::content_scan::scan_page(
+        doc,
+        page,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+    );
+    (!state.incomplete).then(|| {
+        if state.page.area() <= 0.0 {
+            0.0
+        } else {
+            (state.covered_image_area() / state.page.area()).clamp(0.0, 1.0)
+        }
+    })
+}
+
+fn recognized_spans(
+    s: &Storage,
+    page: &RecognizedPage,
+    frame: &PageFrame,
+    position: PositionFrame,
+) -> PdfOcrSpans {
+    recognition_spans(s, &page.ocr, page.transform, frame, position)
+}
+
+fn recognition_spans(
+    s: &Storage,
+    page: &OcrPage,
+    transform: PageTransform,
+    frame: &PageFrame,
+    position: PositionFrame,
+) -> PdfOcrSpans {
+    s.slice(page.spans.iter().map(|span| {
+        let project = |x: f32, y: f32| {
+            let point = transform.pixel_to_page(f64::from(x), f64::from(y));
+            frame.user_point_to_view(point.x, point.y, position)
+        };
+        let points = span.polygon.points.map(|p| project(p.x, p.y));
+        let orientation = span.orientation_degrees.map(|angle| {
+            let origin = project(0.0, 0.0);
+            let vector = project(angle.to_radians().cos(), angle.to_radians().sin());
+            (vector.y - origin.y)
+                .atan2(vector.x - origin.x)
+                .to_degrees()
+        });
+        PdfOcrSpan {
+            text: s.bytes(&span.text),
+            polygon: PdfQuad { points },
+            confidence: span.confidence,
+            orientation: orientation.unwrap_or(0.0),
+            flags: u32::from(orientation.is_some()) * PDF_HAS_ORIENTATION,
+        }
+    }))
 }
 #[cfg(not(feature = "ocr"))]
 unsafe fn native_ocr(
@@ -1154,4 +1322,101 @@ pub(super) unsafe fn compose_items(
         },
     );
     Ok(markdown_result(value, count))
+}
+
+#[cfg(test)]
+mod recognition_tests {
+    use super::*;
+    use pdf_inspector::extractor::display_frame::PageRotate;
+    use pdf_inspector::extractor::PageBox;
+
+    #[test]
+    fn undecodable_page_content_cannot_establish_zero_image_coverage() {
+        let mut doc = lopdf::Document::with_version("1.7");
+        let content = doc.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {
+                "Filter" => "UnsupportedDecoder"
+            },
+            b"compressed bytes".to_vec(),
+        ));
+        let page = doc.add_object(lopdf::dictionary! {
+            "Type" => "Page", "Contents" => content, "MediaBox" => vec![0.into(), 0.into(), 600.into(), 800.into()]
+        });
+        assert_eq!(image_coverage(&doc, page), None);
+    }
+
+    #[test]
+    fn raw_spans_keep_text_confidence_and_rotate_the_real_bitmap_transform() {
+        let page = OcrPage {
+            page_number: 1,
+            spans: vec![OcrSpan {
+                text: "before\0after Ω".into(),
+                polygon: ImageQuad::new([
+                    ImagePoint { x: 10.0, y: 20.0 },
+                    ImagePoint { x: 40.0, y: 20.0 },
+                    ImagePoint { x: 40.0, y: 40.0 },
+                    ImagePoint { x: 10.0, y: 40.0 },
+                ]),
+                confidence: 0.73,
+                orientation_degrees: None,
+            }],
+            mean_confidence: Some(0.73),
+            model: ModelIdentity::new("test", "test"),
+            processing_time_ms: 0,
+            warnings: Vec::new(),
+        };
+        let transform =
+            PageTransform::from_corners(100, 200, (10.0, 420.0), (310.0, 420.0), (10.0, 20.0))
+                .unwrap();
+        for (rotate, expected) in [
+            (
+                PageRotate::Rotate0,
+                [(30.0, 40.0), (120.0, 40.0), (120.0, 80.0), (30.0, 80.0)],
+            ),
+            (
+                PageRotate::Rotate90,
+                [(360.0, 30.0), (360.0, 120.0), (320.0, 120.0), (320.0, 30.0)],
+            ),
+            (
+                PageRotate::Rotate180,
+                [
+                    (270.0, 360.0),
+                    (180.0, 360.0),
+                    (180.0, 320.0),
+                    (270.0, 320.0),
+                ],
+            ),
+            (
+                PageRotate::Rotate270,
+                [(40.0, 270.0), (40.0, 180.0), (80.0, 180.0), (80.0, 270.0)],
+            ),
+        ] {
+            let frame = PageFrame {
+                page: 1,
+                sheet: PageBox {
+                    x0: 10.0,
+                    y0: 20.0,
+                    x1: 310.0,
+                    y1: 420.0,
+                },
+                rotate,
+                unit: 1.25,
+            };
+            let storage = Storage::default();
+            let values =
+                recognition_spans(&storage, &page, transform, &frame, PositionFrame::Display);
+            let span = unsafe { &*values.ptr };
+            assert_eq!(values.len, 1);
+            assert_eq!(
+                unsafe { input::text(span.text).unwrap() },
+                "before\0after Ω"
+            );
+            assert_eq!(span.confidence, 0.73);
+            assert_eq!(span.flags, 0);
+            assert_eq!(frame.info(PositionFrame::Display).user_unit, 1.25);
+            for (point, (x, y)) in span.polygon.points.iter().zip(expected) {
+                assert!((point.x - x).abs() < 0.001 && (point.y - y).abs() < 0.001);
+            }
+        }
+    }
 }

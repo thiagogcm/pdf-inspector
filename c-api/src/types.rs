@@ -24,6 +24,8 @@ pub const PDF_OUT_STRUCTURE: u32 = 16;
 pub const PDF_OUT_GEOMETRY: u32 = 32;
 pub const PDF_OUT_RENDER: u32 = 64;
 pub const PDF_OUT_ANALYSIS: u32 = 128;
+/// Raw recognition spans, independent of the native/Markdown fusion verdict.
+pub const PDF_OUT_OCR_SPANS: u32 = 256;
 /// `PdfRequest.flags`: also treat a weight class at or above
 /// `bold_weight_threshold` as bold.
 pub const PDF_REQUEST_BOLD_FROM_WEIGHT: u32 = 1;
@@ -140,6 +142,8 @@ pub const PDF_PAGE_NATIVE_RECOVERED: u32 = 128;
 /// when `PDF_OUT_ANALYSIS` is requested, and never set under
 /// `PDF_REQUEST_INCLUDE_INVISIBLE`, which skips nothing.
 pub const PDF_PAGE_SKIPPED_INVISIBLE: u32 = 256;
+/// `image_coverage` carries the detector's completed executed-image coverage estimate.
+pub const PDF_PAGE_IMAGE_COVERAGE: u32 = 512;
 /// `PdfPage.reading_order`.
 pub const PDF_READING_SINGLE: u32 = 0;
 pub const PDF_READING_TABULAR: u32 = 1;
@@ -435,6 +439,8 @@ pub struct PdfPageInfo {
     pub width: f32,
     pub height: f32,
     pub rotation: u32,
+    /// Page-local `/UserUnit`, default 1. Page coordinates remain native units.
+    pub user_unit: f32,
 }
 /// Caller-owned positioned content for `pdf_inspector_compose_items`.
 /// Every referenced page needs an entry in `pages`.
@@ -525,6 +531,10 @@ pub struct PdfPage {
     pub lines: PdfSegments,
     pub image: PdfImage,
     pub provenance: PdfProvenance,
+    /// Detector grid estimate in [0, 1], present only with PDF_PAGE_IMAGE_COVERAGE.
+    pub image_coverage: f64,
+    /// Raw OCR spans in the request frame, in native page units. Never fused with native text.
+    pub ocr_spans: PdfOcrSpans,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

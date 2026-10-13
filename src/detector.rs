@@ -12,7 +12,7 @@ use std::path::Path;
 mod content_geometry;
 mod content_mask;
 mod content_resources;
-mod content_scan;
+pub mod content_scan;
 use content_scan::ContentCounts;
 
 /// PDF type classification

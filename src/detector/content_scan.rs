@@ -129,7 +129,7 @@ fn resource_chain<'a>(
 
 /// The scan of the page's content streams, followed through `Do`, and
 /// the streams' own counts.
-fn scan_page<'a>(
+pub fn scan_page<'a>(
     doc: &'a Document,
     page_id: ObjectId,
     unique_chars: &mut HashSet<u8>,
@@ -162,7 +162,7 @@ fn scan_page<'a>(
 
 /// What a scan of content streams counted.
 #[derive(Clone, Copy, Default)]
-pub(super) struct ContentCounts {
+pub struct ContentCounts {
     /// Text-showing operators (`Tj`, `TJ`, `'`, `"`), whatever their render
     /// mode.
     pub(super) text_ops: u32,
@@ -285,10 +285,10 @@ struct SavedScanState {
 /// its text-showing operators, those of them that leave nothing to see,
 /// and the page cells the images it draws cover. A scan that follows no
 /// `Do` only counts.
-struct ContentScanState<'a> {
+pub struct ContentScanState<'a> {
     doc: &'a Document,
     /// The visible page box, which the coverage grid spans.
-    page: UserBox,
+    pub page: UserBox,
     /// The clip in force for image draws: the page box, narrowed by the
     /// boxes of the forms being run and by the clipping paths set with
     /// `W`/`W*`.
@@ -373,7 +373,7 @@ struct ContentScanState<'a> {
     /// Whether content went unread — the invocation budget, the byte
     /// budget or the depth cap ran out — so that the page's evidence is
     /// incomplete.
-    incomplete: bool,
+    pub incomplete: bool,
     /// Form content by object — decompressed, and masked — for forms
     /// invoked again.
     form_content: HashMap<ObjectId, Rc<FormContent>>,
@@ -969,7 +969,7 @@ impl<'a> ContentScanState<'a> {
 
     /// The page area the images drawn cover: the cells they covered, to
     /// the grid's resolution, and no more than their own areas add up to.
-    fn covered_image_area(&self) -> f64 {
+    pub fn covered_image_area(&self) -> f64 {
         let cells: u32 = self.covered_cells.iter().map(|row| row.count_ones()).sum();
         let cell_area = self.page.area() / (COVERAGE_GRID * COVERAGE_GRID) as f64;
         (f64::from(cells) * cell_area).min(self.own_image_area)
