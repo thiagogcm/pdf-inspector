@@ -19,7 +19,8 @@ pub(super) struct PageFrame {
     pub sheet: PageBox,
     /// The page's `/Rotate`, snapped to a right angle.
     pub rotate: PageRotate,
-    pub unit: f32,
+    /// The page's `/UserUnit`.
+    pub user_unit: f32,
 }
 
 impl PageFrame {
@@ -34,7 +35,7 @@ impl PageFrame {
                     page,
                     sheet: visible_page_box(doc, id).unwrap_or(PageBox::LETTER),
                     rotate: page_rotate(doc, id),
-                    unit: user_unit(doc, id)?,
+                    user_unit: user_unit(doc, id)?,
                 })
             })
             .collect::<Fallible<_>>()?;
@@ -59,7 +60,7 @@ impl PageFrame {
             width,
             height,
             rotation: self.rotate.degrees() as u32,
-            user_unit: self.unit,
+            user_unit: self.user_unit,
         }
     }
     /// A raw user-space box (lower-left origin, y up) presented in the
@@ -92,23 +93,25 @@ impl PageFrame {
     }
 }
 
+/// Largest `/UserUnit` accepted.
+const MAX_USER_UNIT: f32 = 75_000.0;
+
+/// The page's own `/UserUnit` (not inherited), 1 when absent.
 fn user_unit(doc: &Document, id: lopdf::ObjectId) -> Fallible<f32> {
-    let page = doc
-        .get_dictionary(id)
-        .map_err(|e| Failure::parse(e.to_string()))?;
-    let value = match page.get(b"UserUnit") {
-        Ok(value) => {
-            doc.dereference(value)
-                .map_err(|e| Failure::parse(e.to_string()))?
-                .1
-        }
-        Err(_) => return Ok(1.0),
+    let parse = |e: lopdf::Error| Failure::parse(e.to_string());
+    let Ok(raw) = doc.get_dictionary(id).map_err(parse)?.get(b"UserUnit") else {
+        return Ok(1.0);
     };
-    let unit = value
+    let unit = doc
+        .dereference(raw)
+        .map_err(parse)?
+        .1
         .as_float()
         .map_err(|_| Failure::parse("invalid page UserUnit"))?;
-    if !unit.is_finite() || unit <= 0.0 || unit > 75_000.0 {
-        return Err(Failure::parse("invalid page UserUnit"));
+    // NaN and infinity fail the range check.
+    if unit > 0.0 && unit <= MAX_USER_UNIT {
+        Ok(unit)
+    } else {
+        Err(Failure::parse("invalid page UserUnit"))
     }
-    Ok(unit)
 }
