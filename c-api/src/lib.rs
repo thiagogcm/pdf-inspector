@@ -93,7 +93,7 @@ impl ErrorOwner {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Failure {
     status: i32,
     message: String,

@@ -17,8 +17,9 @@ use pdf_inspector::{
     DetectionConfig, PageMarkdown, PageRotation, PositionFrame, PositionOptions, ScanStrategy,
 };
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Instant;
 
 /// The loaded document (decrypted once when a password opened it), its
@@ -28,15 +29,23 @@ use std::time::Instant;
 /// so only decryption has to be written back. Request-independent work
 /// (default inspection, the structure tree) is computed once, lazily.
 pub(super) struct DocumentState {
+    shared: Arc<SharedDocumentData>,
+    pub(super) info: PdfDocumentInfo,
+    /// Every handle owns its pointer-backed info independently.
+    _storage: Storage,
+}
+
+/// Pointer-free immutable parse and synchronized derived data. Equal
+/// password-free inputs may share it while their handles overlap.
+pub(super) struct SharedDocumentData {
     bytes: Vec<u8>,
     doc: Document,
     /// 1-indexed page numbers to page objects.
     pages: BTreeMap<u32, ObjectId>,
     frames: Vec<PageFrame>,
-    pub(super) info: PdfDocumentInfo,
-    /// Backs `info.pages`.
-    _storage: Storage,
-    default_inspection: OnceLock<PdfTypeResult>,
+    audit: PdfLoadAudit,
+    metadata: pdf_inspector::detector::DocumentInfo,
+    default_inspection: OnceLock<Fallible<PdfTypeResult>>,
     structure: OnceLock<Option<StructTree>>,
     structure_roles: OnceLock<BTreeMap<u32, BTreeMap<i64, StructRole>>>,
 }
@@ -45,13 +54,64 @@ pub(super) struct DocumentState {
 /// written at open and only read afterwards.)
 const _: () = {
     const fn shared<T: Send + Sync>() {}
-    shared::<(
-        Document,
-        OnceLock<PdfTypeResult>,
-        OnceLock<Option<StructTree>>,
-        OnceLock<BTreeMap<u32, BTreeMap<i64, StructRole>>>,
-    )>()
+    shared::<SharedDocumentData>()
 };
+
+impl std::ops::Deref for DocumentState {
+    type Target = SharedDocumentData;
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
+
+type DocumentCache = HashMap<u64, Vec<Weak<SharedDocumentData>>>;
+
+fn document_cache() -> MutexGuard<'static, DocumentCache> {
+    static CACHE: OnceLock<Mutex<DocumentCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn find_document(cache: &DocumentCache, key: u64, bytes: &[u8]) -> Option<Arc<SharedDocumentData>> {
+    cache.get(&key).and_then(|bucket| {
+        bucket
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|data| data.bytes.as_slice() == bytes)
+    })
+}
+
+fn cached_document(bytes: Vec<u8>, password: Option<&str>) -> Fallible<Arc<SharedDocumentData>> {
+    // Passwords and decrypted serialization must never share another
+    // authentication context, even when the caller supplies an empty password.
+    if password.is_some() {
+        return SharedDocumentData::load(bytes, password).map(Arc::new);
+    }
+    let mut hash = DefaultHasher::new();
+    bytes.hash(&mut hash);
+    let key = hash.finish();
+    {
+        let mut cache = document_cache();
+        cache.retain(|_, bucket| {
+            bucket.retain(|data| data.strong_count() > 0);
+            !bucket.is_empty()
+        });
+        if let Some(data) = find_document(&cache, key, &bytes) {
+            return Ok(data);
+        }
+    }
+    // Parsing and repairs run outside the cache lock. Recheck before
+    // publishing, since another opener may have completed the same input.
+    let data = Arc::new(SharedDocumentData::load(bytes, None)?);
+    let mut cache = document_cache();
+    if let Some(existing) = find_document(&cache, key, &data.bytes) {
+        return Ok(existing);
+    }
+    cache.entry(key).or_default().push(Arc::downgrade(&data));
+    Ok(data)
+}
 /// Inspection for one execution: the document's cached default, or a fresh
 /// run for a non-default detection configuration.
 enum Inspection<'a> {
@@ -67,8 +127,8 @@ impl std::ops::Deref for Inspection<'_> {
         }
     }
 }
-impl DocumentState {
-    pub(super) fn open(bytes: Vec<u8>, password: Option<&str>) -> Fallible<Self> {
+impl SharedDocumentData {
+    fn load(bytes: Vec<u8>, password: Option<&str>) -> Fallible<Self> {
         let leading_bytes = pdf_inspector::pdf_header_offset(&bytes).unwrap_or(0);
         let (mut doc, _, repairs) =
             pdf_inspector::load_document_from_mem_with_repairs(&bytes, password)?;
@@ -106,29 +166,41 @@ impl DocumentState {
         };
         let pages = doc.get_pages();
         let frames = PageFrame::all(&doc)?;
-        let storage = Storage::default();
-        let doc_info = pdf_inspector::detector::read_document_info(&doc);
-        let info = PdfDocumentInfo {
-            page_count: narrow(frames.len()),
-            audit: PdfLoadAudit {
-                flags,
-                leading_bytes: narrow(leading_bytes),
-                widened_form_bboxes: narrow(repairs.widened_form_bboxes),
-                saturated_bbox_numerals: narrow(repairs.saturated_bbox_numerals),
-            },
-            metadata: storage.metadata(&doc_info),
-            pages: storage.slice(frames.iter().map(|f| f.info(PositionFrame::Sheet))),
+        let metadata = pdf_inspector::detector::read_document_info(&doc);
+        let audit = PdfLoadAudit {
+            flags,
+            leading_bytes: narrow(leading_bytes),
+            widened_form_bboxes: narrow(repairs.widened_form_bboxes),
+            saturated_bbox_numerals: narrow(repairs.saturated_bbox_numerals),
         };
         Ok(Self {
             bytes,
             doc,
             pages,
             frames,
-            info,
-            _storage: storage,
+            audit,
+            metadata,
             default_inspection: OnceLock::new(),
             structure: OnceLock::new(),
             structure_roles: OnceLock::new(),
+        })
+    }
+}
+
+impl DocumentState {
+    pub(super) fn open(bytes: Vec<u8>, password: Option<&str>) -> Fallible<Self> {
+        let shared = cached_document(bytes, password)?;
+        let storage = Storage::default();
+        let info = PdfDocumentInfo {
+            page_count: narrow(shared.frames.len()),
+            audit: shared.audit,
+            metadata: storage.metadata(&shared.metadata),
+            pages: storage.slice(shared.frames.iter().map(|f| f.info(PositionFrame::Sheet))),
+        };
+        Ok(Self {
+            shared,
+            info,
+            _storage: storage,
         })
     }
     pub(super) fn count(&self) -> u32 {
@@ -142,16 +214,18 @@ impl DocumentState {
         config: DetectionConfig,
     ) -> Fallible<Inspection<'_>> {
         if !is_default_detection(options) {
-            let fresh = pdf_inspector::detect_pdf_type_mem_with_config(&self.bytes, config)?;
+            let fresh =
+                pdf_inspector::detector::detect_from_document(&self.doc, self.count(), &config)?;
             return Ok(Inspection::Fresh(Box::new(fresh)));
         }
-        if let Some(cached) = self.default_inspection.get() {
-            return Ok(Inspection::Cached(cached));
-        }
-        let fresh = pdf_inspector::detect_pdf_type_mem_with_config(&self.bytes, config)?;
-        Ok(Inspection::Cached(
-            self.default_inspection.get_or_init(|| fresh),
-        ))
+        self.default_inspection
+            .get_or_init(|| {
+                pdf_inspector::detector::detect_from_document(&self.doc, self.count(), &config)
+                    .map_err(Failure::from)
+            })
+            .as_ref()
+            .map(Inspection::Cached)
+            .map_err(Clone::clone)
     }
     /// The tagged-PDF structure tree, parsed once; `None` for untagged files.
     fn structure(&self) -> Option<&StructTree> {

@@ -213,7 +213,7 @@ fn is_pdf_name_delimiter(byte: u8) -> bool {
 /// Detection logic on a pre-loaded document.
 ///
 /// `page_count` should come from `Document::load_metadata()`.
-pub(crate) fn detect_from_document(
+pub fn detect_from_document(
     doc: &Document,
     page_count: u32,
     config: &DetectionConfig,

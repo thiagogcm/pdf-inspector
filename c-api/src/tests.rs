@@ -112,6 +112,7 @@ fn compose_err(c: &PdfComposeInput, options: *const PdfMarkdownOptions) -> i32 {
 #[test]
 fn owned_source_reusable_document_and_independent_snapshots() {
     let doc = Doc::open("bare_name_struct");
+    let sibling = Doc::open("bare_name_struct");
     let mut r = input::default_request();
     r.outputs |= PDF_OUT_ITEMS | PDF_OUT_STRUCTURE | PDF_OUT_TEXT | PDF_OUT_GEOMETRY;
     let first = doc.run(&r);
@@ -123,6 +124,12 @@ fn owned_source_reusable_document_and_independent_snapshots() {
     assert!(!unsafe { string(second.get().markdown) }.contains("# Test"));
     assert!(!unsafe { string(second.pages()[0].markdown) }.contains("# Test"));
     drop(doc);
+    assert_eq!(
+        unsafe { string(sibling.run(&input::default_request()).get().markdown) },
+        initial
+    );
+    assert_eq!(sibling.info().page_count, 1);
+    drop(sibling);
     assert_eq!(unsafe { string(first.get().markdown) }, initial);
     assert!(unsafe { string(second.get().text) }.contains("Test"));
     let page = &first.pages()[0];
@@ -149,7 +156,36 @@ fn source_path_is_read_only_at_open() {
         assert_success(pdf_inspector_open(&source, &mut doc, &mut err), err);
     }
     let doc = Doc(doc);
-    std::fs::remove_file(p).unwrap();
+    // An overlapping handle of the same path must observe changed bytes,
+    // while the first handle keeps its original immutable snapshot.
+    let mut changed = lopdf::Document::load(&p).unwrap();
+    let page = changed.get_pages()[&1];
+    changed.get_dictionary_mut(page).unwrap().set("Rotate", 90);
+    changed.save(&p).unwrap();
+    let mut updated = null_mut();
+    unsafe {
+        assert_success(pdf_inspector_open(&source, &mut updated, &mut err), err);
+    }
+    let updated = Doc(updated);
+    assert_eq!(
+        unsafe { input::slice(doc.info().pages.ptr, 1).unwrap() }[0].rotation,
+        0
+    );
+    assert_eq!(
+        unsafe { input::slice(updated.info().pages.ptr, 1).unwrap() }[0].rotation,
+        90
+    );
+    std::fs::remove_file(&p).unwrap();
+    // A live cached snapshot must not bypass a later path read failure.
+    unsafe {
+        let mut missing = std::ptr::dangling_mut();
+        assert_eq!(
+            pdf_inspector_open(&source, &mut missing, &mut err),
+            PDF_IO_ERROR
+        );
+        assert!(missing.is_null());
+        pdf_inspector_error_free(err);
+    }
     assert!(!doc
         .run(&input::default_request())
         .get()
@@ -313,6 +349,20 @@ fn password_and_null_source_failures_are_owned() {
         pdf_inspector_error_free(e);
     }
     let doc = Doc::bytes(&bytes, Some("secret123"));
+    // A valid live handle must never authorize an open with another password.
+    for password in [PdfBytes::default(), view(b"wrong"), view(b"")] {
+        unsafe {
+            let source = PdfSource { password, ..source };
+            let mut denied = std::ptr::dangling_mut();
+            let mut error = null_mut();
+            assert_eq!(
+                pdf_inspector_open(&source, &mut denied, &mut error),
+                PDF_PASSWORD_ERROR
+            );
+            assert!(denied.is_null());
+            pdf_inspector_error_free(error);
+        }
+    }
     let mut r = input::default_request();
     r.outputs |= PDF_OUT_ITEMS | PDF_OUT_STRUCTURE | PDF_OUT_GEOMETRY | PDF_OUT_TEXT;
     let region = PdfRegionInput {
