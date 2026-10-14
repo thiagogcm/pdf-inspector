@@ -2236,13 +2236,20 @@ fn runtime_loaders_take_only_absolute_files() {
             let mut error = null_mut();
             let missing = b"/nonexistent/pdf-inspector/libruntime.so";
             let status = load(view(missing), &mut error);
-            let expected = if compiled {
-                PDF_RUNTIME_ERROR
-            } else {
-                PDF_UNSUPPORTED
-            };
-            assert_eq!(status, expected);
             assert!(!error.is_null());
+            assert_eq!((*error).status, status);
+            if compiled {
+                let message = string((*error).message);
+                assert!(message.contains("/nonexistent/pdf-inspector/libruntime.so"));
+                match status {
+                    PDF_RUNTIME_ERROR => assert!(message.contains("could not load")),
+                    // Another test may already have loaded the process-wide runtime.
+                    PDF_INVALID_ARGUMENT => assert!(message.contains("already loaded")),
+                    _ => panic!("unexpected runtime failure {status}: {message}"),
+                }
+            } else {
+                assert_eq!(status, PDF_UNSUPPORTED);
+            }
             pdf_inspector_error_free(error);
         }
     }
@@ -2294,6 +2301,21 @@ fn native_ocr_runtime_returns_recognition_and_provenance() {
     };
     let models = models.to_str().unwrap();
     unsafe {
+        // Follow the host's explicit loading order before preparing OCR sessions.
+        for (load, variable) in [
+            (
+                pdf_inspector_pdfium_load
+                    as unsafe extern "C" fn(PdfBytes, *mut *mut PdfError) -> i32,
+                "PDFIUM_LIB_PATH",
+            ),
+            (pdf_inspector_onnxruntime_load, "ORT_DYLIB_PATH"),
+        ] {
+            let path = std::env::var(variable).unwrap_or_else(|_| {
+                panic!("configure {variable} as an absolute library path alongside OCR test models")
+            });
+            let mut error = null_mut();
+            assert_success(load(view(path.as_bytes()), &mut error), error);
+        }
         let options = PdfRuntimeOptions {
             model_directory: view(models.as_bytes()),
             ..runtime::defaults()
@@ -2318,8 +2340,28 @@ fn native_ocr_runtime_returns_recognition_and_provenance() {
     let p = &result.pages()[0];
     assert!(!unsafe { string(p.markdown) }.trim().is_empty());
     assert_eq!(p.flags & PDF_PAGE_OCR_RAN, PDF_PAGE_OCR_RAN);
-    assert_eq!(p.provenance.source, PDF_CONTENT_OCR);
+    assert_eq!(p.provenance.source, PDF_CONTENT_FUSED);
     assert!(p.provenance.render_dpi > 0.0);
+
+    r.outputs = PDF_OUT_OCR_SPANS;
+    let raw = doc.run(&r);
+    let raw_page = &raw.pages()[0];
+    assert!(raw_page.ocr_spans.len > 0);
+    assert_eq!(raw_page.flags & PDF_PAGE_OCR_RAN, PDF_PAGE_OCR_RAN);
+    assert_eq!(raw_page.provenance.source, PDF_CONTENT_OCR);
+    assert_eq!(raw_page.provenance.render_dpi, r.render.dpi);
+    assert_eq!(
+        raw_page.provenance.flags & PDF_HAS_CONFIDENCE,
+        PDF_HAS_CONFIDENCE
+    );
+    assert!((0.0..=1.0).contains(&raw_page.provenance.confidence));
+    assert_eq!(unsafe { string(raw_page.provenance.model) }, unsafe {
+        string(p.provenance.model)
+    });
+    assert_eq!(
+        unsafe { string(raw_page.provenance.model_revision) },
+        unsafe { string(p.provenance.model_revision) }
+    );
 }
 
 #[test]
