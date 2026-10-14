@@ -263,7 +263,7 @@ fn rejects_invalid_descriptors_without_partial_output() {
     r.ocr.download_policy = u32::MAX;
     requests.push(r);
     r = input::default_request();
-    r.outputs = 512;
+    r.outputs = 2048;
     requests.push(r);
     r = input::default_request();
     r.flags = 4;

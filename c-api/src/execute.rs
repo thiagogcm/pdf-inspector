@@ -7,7 +7,7 @@ use lopdf::Document;
 
 use lopdf::ObjectId;
 use pdf_inspector::detector::PdfTypeResult;
-use pdf_inspector::structure_tree::StructTree;
+use pdf_inspector::structure_tree::{StructRole, StructTree};
 use pdf_inspector::tounicode::FontCMaps;
 use pdf_inspector::vision::{
     FusedPageMarkdown, ImagePoint, ImageQuad, ModelIdentity, OcrPage, OcrRun, OcrSpan,
@@ -38,6 +38,7 @@ pub(super) struct DocumentState {
     _storage: Storage,
     default_inspection: OnceLock<PdfTypeResult>,
     structure: OnceLock<Option<StructTree>>,
+    structure_roles: OnceLock<BTreeMap<u32, BTreeMap<i64, StructRole>>>,
 }
 /// Executions share one document across threads: the parsed document and
 /// the lazily filled caches must be shareable. (`info` and its arena are
@@ -48,6 +49,7 @@ const _: () = {
         Document,
         OnceLock<PdfTypeResult>,
         OnceLock<Option<StructTree>>,
+        OnceLock<BTreeMap<u32, BTreeMap<i64, StructRole>>>,
     )>()
 };
 /// Inspection for one execution: the document's cached default, or a fresh
@@ -126,6 +128,7 @@ impl DocumentState {
             _storage: storage,
             default_inspection: OnceLock::new(),
             structure: OnceLock::new(),
+            structure_roles: OnceLock::new(),
         })
     }
     pub(super) fn count(&self) -> u32 {
@@ -156,6 +159,19 @@ impl DocumentState {
             .get_or_init(|| StructTree::from_doc(&self.doc))
             .as_ref()
     }
+    /// Compact page-local role lookup, built once from the cached tree.
+    fn structure_roles(&self) -> &BTreeMap<u32, BTreeMap<i64, StructRole>> {
+        self.structure_roles.get_or_init(|| {
+            self.structure()
+                .map(|tree| {
+                    tree.mcid_to_roles(&self.pages)
+                        .into_iter()
+                        .map(|(page, roles)| (page, roles.into_iter().collect()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
     pub(super) fn frame(&self, page: u32) -> Fallible<&PageFrame> {
         page.checked_sub(1)
             .and_then(|i| self.frames.get(i as usize))
@@ -171,12 +187,15 @@ const ALL_OUTPUTS: u32 = PDF_OUT_INSPECTION
     | PDF_OUT_GEOMETRY
     | PDF_OUT_RENDER
     | PDF_OUT_ANALYSIS
-    | PDF_OUT_OCR_SPANS;
+    | PDF_OUT_OCR_SPANS
+    | PDF_OUT_RASTER
+    | PDF_OUT_STRUCTURE_ROLES;
 
 pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<ResultOwner> {
     let started = Instant::now();
     reserved(r.outputs, ALL_OUTPUTS, "output flags")?;
     let want_spans = r.outputs & PDF_OUT_OCR_SPANS != 0;
+    let want_raster = r.outputs & PDF_OUT_RASTER != 0;
     if want_spans && r.outputs & PDF_OUT_MARKDOWN != 0 {
         return Err(Failure::invalid(
             "raw OCR spans and fused Markdown are separate requests",
@@ -297,6 +316,23 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         view.present |= PDF_OUT_ANALYSIS;
     }
 
+    // Raster-only observations use the same per-page detector signals as
+    // native Markdown, without extracting other pages for font/layout context.
+    // Do not substitute the document's sampled classification for these facts.
+    let raster: BTreeMap<u32, (Option<f64>, Vec<String>)> = if want_raster && native.is_none() {
+        selected
+            .iter()
+            .map(|&number| {
+                let page_id = state.pages[&number];
+                let coverage = image_coverage(&state.doc, page_id);
+                let reasons = raster_reasons(&state.doc, page_id, coverage);
+                (number, (coverage, reasons))
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+
     // 4. Externally recognized pages go through the core's public fusion.
     if !external.is_empty() {
         let native = native.as_mut().unwrap();
@@ -363,30 +399,23 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         HashSet::new()
     };
     // Marked-content roles of the selected pages, sorted by (page, mcid).
-    let elements: Vec<PdfStructureElement> = match (r.outputs & PDF_OUT_STRUCTURE != 0)
-        .then(|| state.structure())
-        .flatten()
-    {
-        Some(tree) => {
-            let mut elements = tree
-                .mcid_to_roles(&state.pages)
-                .into_iter()
-                .filter(|(page, _)| selected.contains(page))
-                .flat_map(|(page, roles)| {
-                    let storage = &storage;
-                    roles
-                        .into_iter()
-                        .map(move |(mcid, role)| PdfStructureElement {
-                            page,
-                            mcid,
-                            role: storage.bytes(role.name()),
-                        })
+    let want_roles = r.outputs & (PDF_OUT_STRUCTURE | PDF_OUT_STRUCTURE_ROLES) != 0;
+    let elements: Vec<PdfStructureElement> = if want_roles {
+        let roles = state.structure_roles();
+        selected
+            .iter()
+            .filter_map(|page| roles.get(page).map(|roles| (*page, roles)))
+            .flat_map(|(page, roles)| {
+                let storage = &storage;
+                roles.iter().map(move |(&mcid, role)| PdfStructureElement {
+                    page,
+                    mcid,
+                    role: storage.bytes(role.name()),
                 })
-                .collect::<Vec<_>>();
-            elements.sort_by_key(|e| (e.page, e.mcid));
-            elements
-        }
-        None => Vec::new(),
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
     #[cfg(feature = "render-pdfium")]
     let mut rendered = if r.outputs & PDF_OUT_RENDER != 0 {
@@ -416,8 +445,12 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             info: page_frame.info(frame),
             ..PdfPage::default()
         };
-        if r.outputs & PDF_OUT_ANALYSIS != 0 {
-            if let Some(coverage) = image_coverage(doc, state.pages[number]) {
+        if r.outputs & (PDF_OUT_ANALYSIS | PDF_OUT_RASTER) != 0 {
+            let coverage = raster.get(number).map_or_else(
+                || image_coverage(doc, state.pages[number]),
+                |(coverage, _)| *coverage,
+            );
+            if let Some(coverage) = coverage {
                 p.image_coverage = coverage;
                 p.flags |= PDF_PAGE_IMAGE_COVERAGE;
             }
@@ -448,6 +481,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
                         .map(|p| p.reasons.as_slice())
                 })
             })
+            .or_else(|| raster.get(number).map(|(_, reasons)| reasons.as_slice()))
             .or_else(|| {
                 inspection
                     .ocr_reasons_by_page
@@ -458,7 +492,11 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         p.ocr_reasons = storage.strings(reasons);
         if native_page.is_some_and(|p| p.needs_ocr)
             || ocr.needs.contains(number)
-            || inspection.pages_needing_ocr.contains(number)
+            || raster
+                .get(number)
+                .is_some_and(|(_, reasons)| !reasons.is_empty())
+            || ((!want_raster || native.is_some() || ocr.ran)
+                && inspection.pages_needing_ocr.contains(number))
         {
             p.flags |= PDF_PAGE_NEEDS_OCR;
         }
@@ -590,7 +628,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
             let turned = content.rotations.get(number).copied();
             p.text_orientation = orientation(turned.unwrap_or(PageRotation::Upright));
         }
-        if r.outputs & PDF_OUT_STRUCTURE != 0 {
+        if want_roles {
             p.structure = storage.slice(elements.iter().filter(|e| e.page == *number).copied());
         }
         #[cfg(feature = "render-pdfium")]
@@ -620,8 +658,10 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
         )?);
     }
     view.pages = storage.slice(page_views);
-    if let (Some(tree), true) = (state.structure(), r.outputs & PDF_OUT_STRUCTURE != 0) {
-        view.structure_nodes = super::semantic::nodes(&storage, tree, &state.pages, &selected);
+    if r.outputs & PDF_OUT_STRUCTURE != 0 {
+        if let Some(tree) = state.structure() {
+            view.structure_nodes = super::semantic::nodes(&storage, tree, &state.pages, &selected);
+        }
     }
     view.processing_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(ResultOwner::new(view, storage))
@@ -785,6 +825,45 @@ unsafe fn native_ocr(
 ) -> Fallible<OcrOutcome> {
     Ok(OcrOutcome::default())
 }
+/// Positive raster reasons grounded in a complete executed-image walk.
+fn raster_reasons(doc: &Document, page: ObjectId, coverage: Option<f64>) -> Vec<String> {
+    // A failed walk or resource inventory with no visible image painting
+    // cannot establish positive raster observations. The template detector
+    // also sees unused resources, so validate its signals against the walk.
+    let Some(_) = coverage.filter(|coverage| *coverage > 0.0) else {
+        return Vec::new();
+    };
+    let signals = pdf_inspector::detector::page_ocr_signals(doc, page);
+    let mut reasons = Vec::new();
+    if signals.has_invisible_text_layer {
+        reasons.push(pdf_inspector::OCR_REASON_INVISIBLE_TEXT_LAYER.to_owned());
+    }
+    if signals.template_image_needs_ocr {
+        reasons.push(pdf_inspector::OCR_REASON_SCANNED.to_owned());
+    }
+    // The core's template signal excludes low-resolution images. Its
+    // Mixed-page routing also admits image-backed pages below the bare
+    // text-operator floor. Reuse its reason classifier only after that
+    // gate: the classifier assumes the page already needs OCR.
+    if reasons.is_empty() && !signals.has_vector_text {
+        let analysis = pdf_inspector::detector::analyze_page_content(doc, page);
+        if analysis.has_images
+            && analysis.text_operator_count < DetectionConfig::default().min_text_ops_per_page
+        {
+            reasons.extend(
+                pdf_inspector::detector::page_ocr_reasons(&analysis)
+                    .into_iter()
+                    .filter(|&reason| {
+                        reason == pdf_inspector::OCR_REASON_SCANNED
+                            || reason == pdf_inspector::OCR_REASON_INVISIBLE_TEXT_LAYER
+                    })
+                    .map(str::to_owned),
+            );
+        }
+    }
+    reasons
+}
+
 /// The fraction of the visible page box the executed images cover, or
 /// `None` when the core's scan could not establish it.
 fn image_coverage(doc: &Document, page: ObjectId) -> Option<f64> {

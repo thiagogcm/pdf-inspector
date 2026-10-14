@@ -26,6 +26,10 @@ pub const PDF_OUT_RENDER: u32 = 64;
 pub const PDF_OUT_ANALYSIS: u32 = 128;
 /// Raw recognition spans, independent of the native/Markdown fusion verdict.
 pub const PDF_OUT_OCR_SPANS: u32 = 256;
+/// Selected-page image coverage and positive raster scan reasons, without Markdown/layout analysis.
+pub const PDF_OUT_RASTER: u32 = 512;
+/// Selected-page MCID roles, without the document semantic tree.
+pub const PDF_OUT_STRUCTURE_ROLES: u32 = 1024;
 /// `PdfRequest.flags`: also treat a weight class at or above
 /// `bold_weight_threshold` as bold.
 pub const PDF_REQUEST_BOLD_FROM_WEIGHT: u32 = 1;

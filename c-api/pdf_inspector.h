@@ -55,6 +55,16 @@
 #define PDF_OUT_OCR_SPANS 256
 
 /**
+ * Selected-page image coverage and positive raster scan reasons, without Markdown/layout analysis.
+ */
+#define PDF_OUT_RASTER 512
+
+/**
+ * Selected-page MCID roles, without the document semantic tree.
+ */
+#define PDF_OUT_STRUCTURE_ROLES 1024
+
+/**
  * `PdfRequest.flags`: also treat a weight class at or above
  * `bold_weight_threshold` as bold.
  */

@@ -363,16 +363,146 @@ fn raster_coverage_measures_drawn_images_without_double_counting_or_resource_inv
         true,
     ));
     let mut request = input::default_request();
-    request.outputs = PDF_OUT_ANALYSIS;
-    let result = doc.run(&request);
-    let pages = result.pages();
-    assert_eq!(pages.len(), 3);
-    for page in pages {
-        assert_ne!(page.flags & PDF_PAGE_IMAGE_COVERAGE, 0);
+    for output in [PDF_OUT_ANALYSIS, PDF_OUT_RASTER] {
+        request.outputs = output;
+        let result = doc.run(&request);
+        let pages = result.pages();
+        assert_eq!(pages.len(), 3);
+        for page in pages {
+            assert_ne!(page.flags & PDF_PAGE_IMAGE_COVERAGE, 0);
+        }
+        assert_eq!(pages[0].image_coverage, 1.0);
+        assert_eq!(pages[1].image_coverage, 0.0);
+        assert_eq!(pages[2].image_coverage, 0.5);
+        if output == PDF_OUT_RASTER {
+            let reasons = unsafe {
+                input::slice(pages[0].ocr_reasons.ptr, pages[0].ocr_reasons.len).unwrap()
+            }
+            .iter()
+            .map(|&reason| unsafe { string(reason) })
+            .collect::<Vec<_>>();
+            assert_eq!(
+                reasons,
+                ["scanned"],
+                "small images still establish an image-only scan"
+            );
+            assert_eq!(
+                pages[1].ocr_reasons.len, 0,
+                "unused resources are not a painted scan"
+            );
+        }
     }
-    assert_eq!(pages[0].image_coverage, 1.0);
-    assert_eq!(pages[1].image_coverage, 0.0);
-    assert_eq!(pages[2].image_coverage, 0.5);
+}
+
+#[test]
+fn raster_signals_are_page_local_even_outside_the_detection_sample() {
+    let paint = "q 600 0 0 800 0 0 cm /Im1 Do Q";
+    let masthead = format!("{paint} BT /F1 12 Tf (FINANCIAL EXPRESS 2024) Tj ET");
+    let hidden = format!("{paint} BT /F1 12 Tf 3 Tr (Hidden layer) Tj ET");
+    let body = format!(
+        "{paint} BT /F1 12 Tf {} ET",
+        "(Ordinary body text with diverse letters) Tj ".repeat(12)
+    );
+    let mut source = document(&["", &masthead, &hidden, &body], true);
+    // A high-resolution background meets the core's template-image gate.
+    for object in source.objects.values_mut() {
+        if let Object::Stream(stream) = object {
+            if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Image") {
+                stream.dict.set("Width", 1000);
+                stream.dict.set("Height", 1000);
+            }
+        }
+    }
+    let doc = open(source);
+    let sample = [1];
+    let mut request = input::default_request();
+    request.outputs = PDF_OUT_RASTER;
+    request.detection.strategy = PDF_SCAN_PAGES;
+    request.detection.pages = PdfPageNumbers {
+        ptr: sample.as_ptr(),
+        len: sample.len(),
+    };
+    for (number, expected) in [
+        (1, vec![]),
+        (2, vec!["scanned"]),
+        (3, vec!["invisible_text_layer", "scanned"]),
+        (4, vec![]),
+    ] {
+        request.pages = PdfPageNumbers {
+            ptr: &number,
+            len: 1,
+        };
+        let result = doc.run(&request);
+        assert_eq!(result.get().pages_sampled, 1);
+        assert_eq!(result.get().present, PDF_OUT_RASTER | PDF_OUT_INSPECTION);
+        let page = &result.pages()[0];
+        assert_eq!(page.info.page, number);
+        assert_eq!(page.image_coverage, if number == 1 { 0.0 } else { 1.0 });
+        let reasons = unsafe { input::slice(page.ocr_reasons.ptr, page.ocr_reasons.len).unwrap() }
+            .iter()
+            .map(|&reason| unsafe { string(reason) })
+            .collect::<Vec<_>>();
+        assert_eq!(reasons, expected);
+        assert_eq!(page.flags & PDF_PAGE_NEEDS_OCR != 0, !expected.is_empty());
+        assert_eq!(
+            page.flags & (PDF_PAGE_HAS_TABLES | PDF_PAGE_HAS_COLUMNS | PDF_PAGE_SKIPPED_INVISIBLE),
+            0
+        );
+        assert!(page.markdown.ptr.is_null());
+        assert!(page.items.ptr.is_null());
+    }
+}
+
+#[test]
+fn page_roles_match_semantic_structure_and_survive_owner_release() {
+    let doc = Doc::open("bare_name_struct");
+    let mut request = input::default_request();
+    request.outputs = PDF_OUT_STRUCTURE;
+    let full = doc.run(&request);
+    request.outputs = PDF_OUT_STRUCTURE_ROLES;
+    let roles = doc.run(&request);
+    let entries = |result: &Owned| {
+        result
+            .pages()
+            .iter()
+            .flat_map(|page| unsafe {
+                input::slice(page.structure.ptr, page.structure.len).unwrap()
+            })
+            .map(|entry| (entry.page, entry.mcid, unsafe { string(entry.role) }))
+            .collect::<Vec<_>>()
+    };
+    let expected = entries(&full);
+    assert!(!expected.is_empty());
+    assert_eq!(entries(&roles), expected);
+    assert!(roles.get().structure_nodes.ptr.is_null());
+    assert_eq!(
+        roles.get().present,
+        PDF_OUT_STRUCTURE_ROLES | PDF_OUT_INSPECTION
+    );
+    drop(full);
+    drop(doc);
+    assert_eq!(entries(&roles), expected);
+}
+
+#[test]
+fn raster_coverage_refuses_undecodable_selected_content() {
+    let mut source = document(&["", ""], false);
+    let page = source.get_pages()[&2];
+    let stream = source.get_page_contents(page)[0];
+    source
+        .get_object_mut(stream)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .dict
+        .set("Filter", "UnsupportedDecoder");
+    let doc = open(source);
+    let mut request = input::default_request();
+    request.outputs = PDF_OUT_RASTER;
+    let result = doc.run(&request);
+    assert_ne!(result.pages()[0].flags & PDF_PAGE_IMAGE_COVERAGE, 0);
+    assert_eq!(result.pages()[0].image_coverage, 0.0);
+    assert_eq!(result.pages()[1].flags & PDF_PAGE_IMAGE_COVERAGE, 0);
 }
 
 #[test]

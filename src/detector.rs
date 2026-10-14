@@ -615,8 +615,8 @@ fn distribute_pages(n: u32, total: u32) -> Vec<u32> {
 
 /// Page content analysis result
 #[derive(Clone, Default)]
-struct PageAnalysis {
-    text_operator_count: u32,
+pub struct PageAnalysis {
+    pub text_operator_count: u32,
     /// Text-showing operators the page executes: in its own content and in
     /// the Form XObjects that content invokes, each once — unlike
     /// `text_operator_count`, which also counts forms merely bound.
@@ -625,7 +625,7 @@ struct PageAnalysis {
     /// run under text render mode 3 (invisible), or under mode 7 (clip
     /// only) with nothing painted through the clip.
     invisible_text_operator_count: u32,
-    has_images: bool,
+    pub has_images: bool,
     /// Whether page has a large background/template image (>50% coverage)
     has_template_image: bool,
     /// Whether the images the page's content draws — by `Do`, in its own
@@ -686,7 +686,7 @@ struct PageAnalysis {
 /// puts `invisible_text_layer` first as well; the reasons after it keep
 /// each surface's own order (there, `scanned` can stand beside the font
 /// and path reasons, which here pre-empt it).
-fn page_ocr_reasons(a: &PageAnalysis) -> Vec<&'static str> {
+pub fn page_ocr_reasons(a: &PageAnalysis) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if a.has_invisible_text_layer {
         reasons.push(crate::OCR_REASON_INVISIBLE_TEXT_LAYER);
@@ -867,7 +867,7 @@ fn resolve_with_shadowing(
 }
 
 /// Analyze a page's content stream for text operators and images
-fn analyze_page_content(doc: &Document, page_id: ObjectId) -> PageAnalysis {
+pub fn analyze_page_content(doc: &Document, page_id: ObjectId) -> PageAnalysis {
     let mut counts = ContentCounts::default();
     let mut all_unique_chars: HashSet<u8> = HashSet::new();
     // Collect font ObjectIds (not names) to avoid cross-scope name collisions.
@@ -2244,7 +2244,7 @@ pub(crate) fn analyze_page_images(doc: &Document, page_id: ObjectId) -> (bool, u
 /// Exposed at crate visibility so `extract_pages_markdown_mem` can apply
 /// the same gates classification needs elsewhere instead of treating the
 /// raw signals alone as sufficient — see #227/#231.
-pub(crate) fn page_ocr_signals(doc: &Document, page_id: ObjectId) -> PageOcrSignals {
+pub fn page_ocr_signals(doc: &Document, page_id: ObjectId) -> PageOcrSignals {
     let analysis = analyze_page_content(doc, page_id);
 
     let needs_ocr_for_template_image = if !analysis.has_template_image {
@@ -2269,15 +2269,15 @@ pub(crate) fn page_ocr_signals(doc: &Document, page_id: ObjectId) -> PageOcrSign
 /// The per-page signals [`page_ocr_signals`] shares between classification
 /// and per-page extraction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PageOcrSignals {
+pub struct PageOcrSignals {
     /// The page's template image is a scan needing OCR rather than a
     /// watermark, letterhead or figure under a text page.
-    pub(crate) template_image_needs_ocr: bool,
+    pub template_image_needs_ocr: bool,
     /// The page's text is drawn as vector outlines.
-    pub(crate) has_vector_text: bool,
+    pub has_vector_text: bool,
     /// Every text-showing operator on the page is invisible while an image
     /// covers the page.
-    pub(crate) has_invisible_text_layer: bool,
+    pub has_invisible_text_layer: bool,
 }
 
 /// Recursively collect image dimensions from XObject resources,
