@@ -1375,6 +1375,15 @@ fn load_audit_counts_leading_bytes_before_header() {
 }
 
 #[test]
+fn load_audit_counts_the_objects_the_loader_holds() {
+    let bytes = std::fs::read("../tests/fixtures/bare_name_struct.pdf").unwrap();
+    let (loaded, _) = pdf_inspector::load_document_from_mem_with_password(&bytes, None).unwrap();
+    let doc = Doc::bytes(&bytes, None);
+    assert!(doc.info().audit.object_count > 0);
+    assert_eq!(doc.info().audit.object_count as usize, loaded.objects.len());
+}
+
+#[test]
 fn document_info_exposes_sheet_pages_and_audit() {
     assert!(unsafe { pdf_inspector_document_info(null()) }.is_null());
     let doc = with_rotate(90);
@@ -2451,7 +2460,7 @@ fn emit_c_layout_contract() {
     record!(PdfImage; width, height, stride, format, pixels, pixel_to_page, page_to_pixel);
     record!(PdfProvenance; source, flags, confidence, render_dpi, render_ms, ocr_ms, assembly_ms, model, model_revision, warnings);
     record!(PdfInterval; x0, x1);
-    record!(PdfLoadAudit; flags, leading_bytes, widened_form_bboxes, saturated_bbox_numerals);
+    record!(PdfLoadAudit; flags, leading_bytes, widened_form_bboxes, saturated_bbox_numerals, object_count);
     record!(PdfCMapGap; font, codes, interpolated, unmapped);
     record!(PdfPage; info, flags, reading_order, text_orientation, markdown, text, ocr_reasons, items, columns, charts, structure, rectangles, lines, image, provenance, image_coverage, ocr_spans);
     record!(PdfCell; row, column, row_span, column_span, flags, bounds, text);

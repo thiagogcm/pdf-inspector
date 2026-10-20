@@ -491,7 +491,9 @@ pub struct PdfInterval {
 }
 /// Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset
 /// in the source bytes; `saturated_bbox_numerals` counts `/BBox` numerals
-/// repaired before parsing.
+/// repaired before parsing. `object_count` is the number of objects the
+/// loader holds, those of object streams included: a count well below the
+/// file's own shows that the loader read only part of it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PdfLoadAudit {
@@ -499,6 +501,7 @@ pub struct PdfLoadAudit {
     pub leading_bytes: u32,
     pub widened_form_bboxes: u32,
     pub saturated_bbox_numerals: u32,
+    pub object_count: u32,
 }
 /// ToUnicode/CMap coverage observed while decoding positioned content.
 /// `interpolated` codes were recovered from a one-code gap; `unmapped`

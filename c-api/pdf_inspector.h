@@ -621,13 +621,16 @@ typedef struct {
 /**
  * Load-time repairs recorded at open. `leading_bytes` is the `%PDF-` offset
  * in the source bytes; `saturated_bbox_numerals` counts `/BBox` numerals
- * repaired before parsing.
+ * repaired before parsing. `object_count` is the number of objects the
+ * loader holds, those of object streams included: a count well below the
+ * file's own shows that the loader read only part of it.
  */
 typedef struct {
   uint32_t flags;
   uint32_t leading_bytes;
   uint32_t widened_form_bboxes;
   uint32_t saturated_bbox_numerals;
+  uint32_t object_count;
 } PdfLoadAudit;
 
 /**

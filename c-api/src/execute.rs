@@ -172,6 +172,7 @@ impl SharedDocumentData {
             leading_bytes: narrow(leading_bytes),
             widened_form_bboxes: narrow(repairs.widened_form_bboxes),
             saturated_bbox_numerals: narrow(repairs.saturated_bbox_numerals),
+            object_count: narrow(doc.objects.len()),
         };
         Ok(Self {
             bytes,
