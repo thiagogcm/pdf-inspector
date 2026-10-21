@@ -24,7 +24,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dy
 tempfile = "3.3"
 
 [features]
-default = []
+default = ["ocr"]
 model-download = ["pdf-inspector/model-download"]
 ocr = ["model-download", "pdf-inspector/ocr", "render-pdfium", "dep:ort"]
 render-pdfium = ["pdf-inspector/render-pdfium"]

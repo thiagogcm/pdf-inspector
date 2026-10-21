@@ -378,12 +378,18 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     // 3. Native per-page pass (Markdown, OCR routing, layout flags).
     let mut native = if want_pages && !ocr_covers_all {
         let zero = selected.iter().map(|p| p - 1).collect::<Vec<_>>();
-        Some(pdf_inspector::extract_pages_markdown_mem_with_options(
-            &state.bytes,
-            Some(&zero),
-            None,
-            &md,
-        )?)
+        Some(
+            pdf_inspector::extract_pages_markdown_mem_impl(
+                &state.bytes,
+                Some(&zero),
+                None,
+                &md,
+                md.strip_headers_footers,
+                false,
+                false,
+            )?
+            .result,
+        )
     } else {
         None
     };
