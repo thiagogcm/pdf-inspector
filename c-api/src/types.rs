@@ -368,9 +368,8 @@ pub struct PdfRequest {
 /// PDF_LEGACY_SYMBOL_REWRITE is decoding provenance, not an OCR verdict.
 /// `font_weight` is 0 when unknown, else 100..=900. `bold_source` is 0 when
 /// `is_bold` is unset, else `PDF_BOLD_FONT_*` / `PDF_BOLD_PAINTED`.
-/// `fixed_pitch` is `PDF_PITCH_*`. `dest_page` is a 1-indexed GoTo target;
-/// 0 means none. URI stays in `link`. Composition ignores `dest_page`: the
-/// Markdown pipeline has no destination concept. `fill_color` and `stroke_color`
+/// `fixed_pitch` is `PDF_PITCH_*`. A link item holds its URI in `link`.
+/// `fill_color` and `stroke_color`
 /// carry the non-stroking and stroking colours as 8-bit sRGB `0x00RRGGBB` when
 /// `PDF_HAS_FILL_COLOR` and `PDF_HAS_STROKE_COLOR` are set. `render_mode` is
 /// `0..=7` (see `PDF_RENDER_MODE_*`) when `PDF_HAS_RENDER_MODE` is set.
@@ -388,7 +387,6 @@ pub struct PdfItem {
     pub font_weight: u32,
     pub bold_source: u32,
     pub fixed_pitch: u32,
-    pub dest_page: u32,
     pub fill_color: u32,
     pub stroke_color: u32,
     pub render_mode: u32,

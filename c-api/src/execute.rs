@@ -508,12 +508,6 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
     }
     .into_iter();
 
-    let dest_links = if r.outputs & PDF_OUT_ITEMS != 0 {
-        super::links::dest_items(&storage, doc, &selected, state, frame)
-    } else {
-        Vec::new()
-    };
-
     let mut page_views = Vec::new();
     let mut markdown_parts = Vec::new();
     let mut text_parts = Vec::new();
@@ -648,13 +642,7 @@ pub(super) unsafe fn run(state: &DocumentState, r: &PdfRequest) -> Fallible<Resu
                 p.items = storage.slice(
                     page_items
                         .iter()
-                        .map(|i| storage.item(i, frame_height))
-                        .chain(
-                            dest_links
-                                .iter()
-                                .filter(|item| item.page == *number)
-                                .copied(),
-                        ),
+                        .map(|i| storage.item(i, frame_height)),
                 );
             }
             if let Some(text) = sheet_text.remove(number) {
@@ -1390,8 +1378,8 @@ pub(super) unsafe fn compose_items(
             PDF_ITEM_IMAGE => pdf_inspector::types::ItemType::Image,
             PDF_ITEM_LINK => {
                 let uri = text(i.link)?;
-                if uri.is_empty() && i.dest_page == 0 {
-                    return Err(Failure::invalid("link item has no URI or dest_page"));
+                if uri.is_empty() {
+                    return Err(Failure::invalid("link item has no URI"));
                 }
                 pdf_inspector::types::ItemType::Link(uri.into())
             }

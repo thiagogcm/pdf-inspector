@@ -7,7 +7,6 @@ _Static_assert(sizeof(((PdfRequest *)0)->outputs) == 4, "flags have a fixed widt
 _Static_assert(sizeof(((PdfRequest *)0)->flags) == 4, "request flags have a fixed width");
 _Static_assert(sizeof(((PdfError *)0)->status) == 4, "status has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->mcid) == 8, "MCID has a fixed width");
-_Static_assert(sizeof(((PdfItem *)0)->dest_page) == 4, "dest_page has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->fill_color) == 4, "fill_color has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->stroke_color) == 4, "stroke_color has a fixed width");
 _Static_assert(sizeof(((PdfItem *)0)->render_mode) == 4, "render_mode has a fixed width");

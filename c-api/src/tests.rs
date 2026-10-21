@@ -1340,7 +1340,6 @@ fn item_view_copies_font_metadata() {
     assert_eq!(item.fill_color, 0);
     assert_eq!(item.stroke_color, 0);
     assert_eq!(item.render_mode, 0);
-    assert_eq!(item.dest_page, 0);
 }
 
 #[test]
@@ -1414,8 +1413,6 @@ fn analysis_forwards_layout_and_reading_order() {
     let columns = unsafe { input::slice(page.columns.ptr, page.columns.len).unwrap() };
     assert!(columns.len() <= 1);
     assert!(columns.iter().all(|column| column.x1 >= column.x0));
-    let items = unsafe { input::slice(page.items.ptr, page.items.len).unwrap() };
-    assert!(items.iter().all(|item| item.dest_page == 0));
 }
 
 #[test]
@@ -1493,12 +1490,11 @@ fn compose_reconstructs_font_metadata_fields() {
 }
 
 #[test]
-fn compose_accepts_dest_page_without_uri() {
+fn compose_refuses_a_link_without_a_uri() {
     let storage = super::output::Storage::default();
     let item = PdfItem {
         page: 1,
         kind: PDF_ITEM_LINK,
-        dest_page: 2,
         bounds: PdfBox {
             x0: 1.0,
             y0: 1.0,
@@ -1518,11 +1514,8 @@ fn compose_accepts_dest_page_without_uri() {
         rotation: 0,
         user_unit: 1.0,
     };
-    compose_ok(&compose_one_item(&info, &item), null());
-    let mut missing = item;
-    missing.dest_page = 0;
     assert_eq!(
-        compose_err(&compose_one_item(&info, &missing), null()),
+        compose_err(&compose_one_item(&info, &item), null()),
         PDF_INVALID_ARGUMENT
     );
 }
@@ -2449,7 +2442,7 @@ fn emit_c_layout_contract() {
     record!(PdfOcrSpan; text, polygon, confidence, orientation, flags);
     record!(PdfOcrPageInput; page, flags, confidence, processing_ms, model, model_revision, warnings, spans);
     record!(PdfRequest; outputs, pages, markdown, detection, render, ocr, regions, tables, external_ocr, frame, flags, bold_weight_threshold);
-    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, font_weight, bold_source, fixed_pitch, dest_page, fill_color, stroke_color, render_mode, text, font, font_tag, link);
+    record!(PdfItem; page, kind, flags, bounds, font_size, rotation, baseline_shift, mcid, font_weight, bold_source, fixed_pitch, fill_color, stroke_color, render_mode, text, font, font_tag, link);
     record!(PdfStructureElement; page, mcid, role);
     record!(PdfStructureNode; parent, role, alt_text, actual_text, language, references);
     record!(PdfContentReference; page, mcid);

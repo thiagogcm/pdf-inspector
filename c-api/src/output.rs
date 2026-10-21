@@ -117,7 +117,6 @@ impl Storage {
                 Some(true) => PDF_PITCH_FIXED,
                 Some(false) => PDF_PITCH_PROPORTIONAL,
             },
-            dest_page: 0,
             fill_color,
             stroke_color,
             render_mode,
